@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#-------------------------------------------------------------------------------
+# Test stub: powershell.exe
+#
+# Emulates every Windows-side call the setup script makes:
+#   - [Environment]::GetFolderPath('UserProfile')  -> fake profile path
+#   - Claude Desktop policy write / verify / removal (registry) -> success
+#
+# Every invocation is appended to $T_WORKSTATE/powershell-calls.log when
+# that variable is set (so tests can assert which registry writes happened).
+#
+# Env:
+#   PS_USERNAME - Windows user name to report. Defaults to "Test User"
+#                 which contains a SPACE on purpose (the tricky case).
+#-------------------------------------------------------------------------------
+user="${PS_USERNAME:-Test User}"
+if [ -n "${T_WORKSTATE:-}" ]; then
+  printf 'powershell %s\n' "$*" >> "${T_WORKSTATE}/powershell-calls.log"
+fi
+case "$*" in
+  *GetFolderPath*)
+    case "$*" in
+      *LocalApplicationData*)
+        printf 'C:\\Users\\%s\\AppData\\Local\r\n' "$user"
+        ;;
+      *)
+        printf 'C:\\Users\\%s\r\n' "$user"
+        ;;
+    esac
+    exit 0
+    ;;
+  *Get-ItemProperty*inferenceProvider*)
+    printf 'gateway\r\n'
+    exit 0
+    ;;
+  *New-ItemProperty*)
+    if [ -n "${PS_DESKTOP_DENY:-}" ]; then
+      printf "New-ItemProperty : ...Policies\\Claude' is denied.\n" >&2
+      exit 1
+    fi
+    printf 'DESKTOP_POLICY_WRITTEN\n'
+    exit 0
+    ;;
+  *Remove-ItemProperty*)
+    exit 0
+    ;;
+esac
+printf 'C:\\Users\\%s\r\n' "$user"
+exit 0

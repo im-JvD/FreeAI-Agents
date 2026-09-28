@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#-------------------------------------------------------------------------------
+# Test stub: apt-get
+#
+# Simulates apt-get. When asked to install docker.io it "installs" the docker
+# CLI stub (docker.installer is copied to docker inside $STUBBIN) so the
+# install-vs-skip branching of the main script is exercised for real.
+#
+# Env:
+#   STUBBIN         - stub binaries dir (required)
+#   T_WORKSTATE     - per-test state dir (required)
+#   DOCKER_APT_FAIL - when non-empty, apt-get fails with exit code 100
+#-------------------------------------------------------------------------------
+LOG="${T_WORKSTATE:?T_WORKSTATE not set}/apt-calls.log"
+echo "apt-get $*" >> "$LOG"
+
+case "$*" in
+  *docker.io*)
+    if [ -n "${DOCKER_APT_FAIL:-}" ]; then
+      echo "E: Unable to locate package docker.io (simulated failure)" >&2
+      exit 100
+    fi
+    cp "${STUBBIN:?STUBBIN not set}/docker.installer" "${STUBBIN}/docker"
+    chmod +x "${STUBBIN}/docker"
+    echo "apt-get: docker.io installed (stub)"
+    ;;
+esac
+exit 0

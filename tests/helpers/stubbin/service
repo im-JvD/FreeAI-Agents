@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#-------------------------------------------------------------------------------
+# Test stub: service (sysvinit control) - logs the call and succeeds.
+#-------------------------------------------------------------------------------
+LOG="${T_WORKSTATE:?T_WORKSTATE not set}/docker-calls.log"
+echo "service $*" >> "$LOG"
+exit 0

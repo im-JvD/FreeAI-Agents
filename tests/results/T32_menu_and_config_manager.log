@@ -1,0 +1,133 @@
+
+=================================================================
+=================================================================
+            Free AI Agents  |  Local AI Gateway Manager
+            BOT Version [ 3.0.0 ]
+=================================================================
+=================================================================
+
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart
+   3 - Stop
+   4 - Update ( re-download script + full reinstall, keeps keys & proxy )
+   5 - Show Status
+   6 - Remove ( Full wipe )
+   7 - Show Live Logs
+   8 - Config Manager ( proxy on/off - edit tokens - re-apply Claude config )
+   0 - Exit ( CTRL + C )
+
+
+
+  --- CONFIG MANAGER ---
+   1 - Gateway proxy ON   (route ALL engine traffic via your Windows proxy)
+   2 - Gateway proxy OFF  (direct connections)
+   3 - Re-enter provider tokens (applied to BOTH engines)
+   4 - Re-apply Claude configs (CLI settings.json + desktop profile)
+   5 - Switch the ACTIVE desktop profile (Free Agents / other)
+   0 - Back
+
+
+=================================================================
+=================================================================
+            Free AI Agents  |  Local AI Gateway Manager
+            BOT Version [ 3.0.0 ]
+=================================================================
+=================================================================
+
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart
+   3 - Stop
+   4 - Update ( re-download script + full reinstall, keeps keys & proxy )
+   5 - Show Status
+   6 - Remove ( Full wipe )
+   7 - Show Live Logs
+   8 - Config Manager ( proxy on/off - edit tokens - re-apply Claude config )
+   0 - Exit ( CTRL + C )
+
+
+   Re-download the script AND run the full reinstall? Keys and the   Windows proxy setting are KEPT. Continue? [y/N]: [INFO] Update cancelled.
+
+=================================================================
+=================================================================
+            Free AI Agents  |  Local AI Gateway Manager
+            BOT Version [ 3.0.0 ]
+=================================================================
+=================================================================
+
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart
+   3 - Stop
+   4 - Update ( re-download script + full reinstall, keeps keys & proxy )
+   5 - Show Status
+   6 - Remove ( Full wipe )
+   7 - Show Live Logs
+   8 - Config Manager ( proxy on/off - edit tokens - re-apply Claude config )
+   0 - Exit ( CTRL + C )
+
+
+[INFO] Bye!
+    ok: exit code = 0
+    ok: contains: Free AI Agents
+    ok: contains: BOT Version [ 3.0.0 ]
+    ok: contains: Config Manager
+    ok: contains: CONFIG MANAGER
+    ok: contains: Gateway proxy ON
+    ok: contains: Re-enter provider tokens (applied to BOTH engines)
+    ok: contains: Re-apply Claude configs
+    ok: contains: Switch the ACTIVE desktop profile
+    ok: contains: Update cancelled.
+    ok: contains: Bye!
+
+=================================================================
+=================================================================
+            Free AI Agents  |  Local AI Gateway Manager
+            BOT Version [ 3.0.0 ]
+=================================================================
+=================================================================
+
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart
+   3 - Stop
+   4 - Update ( re-download script + full reinstall, keeps keys & proxy )
+   5 - Show Status
+   6 - Remove ( Full wipe )
+   7 - Show Live Logs
+   8 - Config Manager ( proxy on/off - edit tokens - re-apply Claude config )
+   0 - Exit ( CTRL + C )
+
+
+[WARN] Invalid choice: 'x'. Pick 0-8.
+
+=================================================================
+=================================================================
+            Free AI Agents  |  Local AI Gateway Manager
+            BOT Version [ 3.0.0 ]
+=================================================================
+=================================================================
+
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart
+   3 - Stop
+   4 - Update ( re-download script + full reinstall, keeps keys & proxy )
+   5 - Show Status
+   6 - Remove ( Full wipe )
+   7 - Show Live Logs
+   8 - Config Manager ( proxy on/off - edit tokens - re-apply Claude config )
+   0 - Exit ( CTRL + C )
+
+
+[INFO] Bye!
+    ok: exit code = 0
+    ok: contains: Invalid choice: 'x'. Pick 0-8.
+
+--- docker-calls.log ---
+
+--- apt-calls.log ---
+
+--- containers.txt ---
+
+--- generated config.yaml ---
+
+--- generated daemon.json (virtual) ---
+
+--- generated Claude settings.json ---

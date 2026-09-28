@@ -1,0 +1,84 @@
+
+=================================================================
+=================================================================
+            Free AI Agents  |  Local AI Gateway Manager
+            BOT Version [ 3.0.0 ]
+=================================================================
+=================================================================
+
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart
+   3 - Stop
+   4 - Update ( re-download script + full reinstall, keeps keys & proxy )
+   5 - Show Status
+   6 - Remove ( Full wipe )
+   7 - Show Live Logs
+   8 - Config Manager ( proxy on/off - edit tokens - re-apply Claude config )
+   0 - Exit ( CTRL + C )
+
+
+
+   Which engine(s) do you want to install?
+     1 - LiteLLM proxy   (Docker, port 4000)   [default]
+     2 - OmniRoute        (Docker/Node, port 20128)
+     3 - Both
+
+
+[INFO] === FULL INSTALL: starting ===
+
+[INFO] [1/9] Checking WSL2 environment...
+[WARN] This does not look like a WSL kernel (/proc/version).
+[WARN] Continuing anyway - Windows/PowerShell integration may fail.
+[ OK ] WSL2 environment looks good.
+[INFO] [2/9] Installing Docker Engine (docker.io from Ubuntu apt repository)...
+apt-get: docker.io installed (stub)
+[INFO] [3/9] Configuring Iranian Docker Hub mirrors (/etc/docker/daemon.json)...
+[ OK ] Registry mirrors written:
+       - https://docker.arvancloud.ir
+       - https://docker.hub.iran.liara.run
+       - https://docker.iranserver.com
+[INFO]        Starting/restarting the Docker daemon...
+[ OK ] Docker daemon is up and running.
+
+[INFO] [4/9] API keys setup (5 providers)
+
+[INFO]        --- Windows proxy routing (optional) ---
+       If a proxy app runs on Windows (Clash / v2rayN / Hiddify / Nekoray),
+       LiteLLM can route ALL provider traffic through it - this fixes region
+       blocks (Google / Cerebras / ...) without a system-wide VPN.
+       Route provider traffic through your Windows proxy? [y/N]: [INFO]        Windows proxy: disabled (direct connections).
+       Press ENTER to skip a provider you do not use.
+       At least ONE key is required.
+
+[FAIL] At least ONE API key is required. Let's try again.
+
+[FAIL] At least ONE API key is required. Let's try again.
+
+[FAIL] At least ONE API key is required. Exiting after 3 attempts.
+    ok: exit code = 1
+    ok: contains: Exiting after 3 attempts
+
+--- docker-calls.log ---
+service docker restart
+systemctl enable docker.service
+docker info
+docker inspect -f {{range .Config.Env}}{{println .}}{{end}} litellm
+
+--- apt-calls.log ---
+apt-get update -y
+apt-get install -y docker.io
+
+--- containers.txt ---
+
+--- generated config.yaml ---
+
+--- generated daemon.json (virtual) ---
+{
+  "registry-mirrors": [
+    "https://docker.arvancloud.ir",
+    "https://docker.hub.iran.liara.run",
+    "https://docker.iranserver.com"
+  ]
+}
+
+--- generated Claude settings.json ---

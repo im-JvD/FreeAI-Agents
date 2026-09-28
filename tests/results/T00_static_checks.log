@@ -1,0 +1,5 @@
+    ok: script file exists
+    ok: bash -n (syntax) OK
+    ok: shebang OK
+    ok: executable bit set
+    ok: script is 100% printable ASCII (RTL-safe)

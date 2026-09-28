@@ -1,0 +1,136 @@
+
+=================================================================
+=================================================================
+            Free AI Agents  |  Local AI Gateway Manager
+            BOT Version [ 3.0.0 ]
+=================================================================
+=================================================================
+
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart
+   3 - Stop
+   4 - Update ( re-download script + full reinstall, keeps keys & proxy )
+   5 - Show Status
+   6 - Remove ( Full wipe )
+   7 - Show Live Logs
+   8 - Config Manager ( proxy on/off - edit tokens - re-apply Claude config )
+   0 - Exit ( CTRL + C )
+
+
+
+   Which engine(s) do you want to install?
+     1 - LiteLLM proxy   (Docker, port 4000)   [default]
+     2 - OmniRoute        (Docker/Node, port 20128)
+     3 - Both
+
+
+[INFO] === FULL INSTALL: starting ===
+
+[INFO] [1/9] Checking WSL2 environment...
+[WARN] This does not look like a WSL kernel (/proc/version).
+[WARN] Continuing anyway - Windows/PowerShell integration may fail.
+[ OK ] WSL2 environment looks good.
+[INFO] [2/9] Installing Docker Engine (docker.io from Ubuntu apt repository)...
+apt-get: docker.io installed (stub)
+[INFO] [3/9] Configuring Iranian Docker Hub mirrors (/etc/docker/daemon.json)...
+[ OK ] Registry mirrors written:
+       - https://docker.arvancloud.ir
+       - https://docker.hub.iran.liara.run
+       - https://docker.iranserver.com
+[INFO]        Starting/restarting the Docker daemon...
+[ OK ] Docker daemon is up and running.
+
+[INFO] [4/9] API keys setup (5 providers)
+
+[INFO]        --- Windows proxy routing (optional) ---
+       If a proxy app runs on Windows (Clash / v2rayN / Hiddify / Nekoray),
+       LiteLLM can route ALL provider traffic through it - this fixes region
+       blocks (Google / Cerebras / ...) without a system-wide VPN.
+       Route provider traffic through your Windows proxy? [y/N]: [INFO]        Windows proxy: disabled (direct connections).
+       Press ENTER to skip a provider you do not use.
+       At least ONE key is required.
+
+
+[ OK ] Collected 1 API key(s):
+         Groq       : gsk_****9abc
+         OpenRouter : <skipped>
+         Google AI  : <skipped>
+         Cerebras   : <skipped>
+         Mistral    : <skipped>
+
+[INFO]        Verifying API keys against the providers...
+[ OK ]          Groq: valid (HTTP 200)
+[ OK ] LiteLLM master key generated and saved to: /tmp/litellm-test.6Kf9vV/home/.litellm/master_key.txt
+[ OK ] Dashboard login saved to: /tmp/litellm-test.6Kf9vV/home/.litellm/dashboard_credentials.txt
+[INFO] [5/9] Generating LiteLLM configuration: /tmp/litellm-test.6Kf9vV/home/.litellm/config.yaml
+[ OK ] config.yaml generated (only providers with keys are enabled).
+[INFO] [6/9] Pulling prebuilt LiteLLM image (no build step): ghcr.io/berriai/litellm:main-latest
+[INFO]        This may take several minutes on the first run...
+Error response from daemon: simulated pull failure (test stub)
+[FAIL] Image pull failed after 1 attempt(s). Fixes, in order:
+         1. Simply re-run the installer - TLS timeouts are often transient.
+         2. Check your internet connection inside WSL:  curl -I https://ghcr.io/v2/
+         3. Turn a VPN on (on the WINDOWS side) and re-run the installer.
+         4. Use a ghcr mirror:   LITELLM_GHCR_MIRROR=ghcr.nju.edu.cn bash setup.sh
+         5. Use a custom image:  LITELLM_IMAGE=<registry>/berriai/litellm:main-latest bash setup.sh
+    ok: exit code = 1
+    ok: contains: Image pull failed
+    ok: file missing: /mnt/c/Users/Test User/.claude/settings.json
+
+--- docker-calls.log ---
+service docker restart
+systemctl enable docker.service
+docker info
+docker inspect -f {{range .Config.Env}}{{println .}}{{end}} litellm
+docker image inspect ghcr.io/berriai/litellm:main-latest
+docker pull ghcr.io/berriai/litellm:main-latest
+
+--- apt-calls.log ---
+apt-get update -y
+apt-get install -y docker.io
+
+--- containers.txt ---
+
+--- generated config.yaml ---
+model_list:
+  # ---------------- Groq (fast inference) ----------------
+  # NOTE: model_name MUST contain 'claude' - the Claude Desktop app
+  #       model picker only keeps ids containing 'claude' or 'anthropic'.
+  - model_name: claude-gpt-oss-120b
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      api_base: https://api.groq.com/openai/v1
+  - model_name: claude-gpt-oss-20b
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+      api_base: https://api.groq.com/openai/v1
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      api_base: https://api.groq.com/openai/v1
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+      api_base: https://api.groq.com/openai/v1
+
+litellm_settings:
+  drop_params: true        # silently drop unsupported provider params
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+--- generated daemon.json (virtual) ---
+{
+  "registry-mirrors": [
+    "https://docker.arvancloud.ir",
+    "https://docker.hub.iran.liara.run",
+    "https://docker.iranserver.com"
+  ]
+}
+
+--- generated Claude settings.json ---

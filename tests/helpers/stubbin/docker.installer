@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+#-------------------------------------------------------------------------------
+# Test stub: docker (this file is a template - the apt-get stub copies it to
+# $STUBBIN/docker when the main script "installs" docker.io)
+#
+# A stateful docker CLI emulator:
+#   - records every command line into $T_WORKSTATE/docker-calls.log
+#   - tracks container names in $T_WORKSTATE/containers.txt  (like `docker ps -a`)
+#   - tracks the running set in $T_WORKSTATE/container-running.txt
+#   - answers `docker inspect -f '...'` from that state
+#
+# Env:
+#   T_WORKSTATE      - per-test state dir (required)
+#   DOCKER_PULL_FAIL - when non-empty, `docker pull` fails with exit code 1
+#-------------------------------------------------------------------------------
+LOG="${T_WORKSTATE:?T_WORKSTATE not set}/docker-calls.log"
+STATE="${T_WORKSTATE:?}/containers.txt"
+RUNNING="${T_WORKSTATE:?}/container-running.txt"
+IMAGES="${T_WORKSTATE:?}/images.txt"
+touch "$STATE" "$RUNNING" "$IMAGES"
+echo "docker $*" >> "$LOG"
+
+cmd="${1:-}"
+if [ "$#" -gt 0 ]; then shift; fi
+
+mark_running() {
+  grep -vxF "$1" "$RUNNING" 2>/dev/null > "${RUNNING}.tmp" || true
+  [ -f "${RUNNING}.tmp" ] && mv "${RUNNING}.tmp" "$RUNNING"
+  echo "$1" >> "$RUNNING"
+}
+mark_stopped() {
+  grep -vxF "$1" "$RUNNING" 2>/dev/null > "${RUNNING}.tmp" || true
+  [ -f "${RUNNING}.tmp" ] && mv "${RUNNING}.tmp" "$RUNNING"
+}
+
+case "$cmd" in
+  info)
+    exit 0
+    ;;
+  ps)
+    [ -f "$STATE" ] && cat "$STATE"
+    exit 0
+    ;;
+  pull)
+    image="${*: -1}"
+    if [ -n "${DOCKER_PULL_FAIL:-}" ]; then
+      echo "Error response from daemon: simulated pull failure (test stub)" >&2
+      exit 1
+    fi
+    if [ -n "${DOCKER_PULL_FAIL_MATCH:-}" ]; then
+      case "$image" in
+        *"${DOCKER_PULL_FAIL_MATCH}"*)
+          echo "net/http: TLS handshake timeout (simulated, match=${DOCKER_PULL_FAIL_MATCH})" >&2
+          exit 1
+          ;;
+      esac
+    fi
+    grep -vxF "$image" "$IMAGES" 2>/dev/null > "${IMAGES}.tmp" || true
+    [ -f "${IMAGES}.tmp" ] && mv "${IMAGES}.tmp" "$IMAGES"
+    echo "$image" >> "$IMAGES"
+    exit 0
+    ;;
+  image)
+    sub="${1:-}"; shift || true
+    name="${*: -1}"
+    if [ "$sub" = "inspect" ]; then
+      if grep -qxF "$name" "$IMAGES" 2>/dev/null; then
+        echo "fake-image-id"
+        exit 0
+      fi
+      exit 1
+    fi
+    exit 0
+    ;;
+  tag)
+    src="${1:-}"; dst="${2:-}"
+    grep -vxF "$dst" "$IMAGES" 2>/dev/null > "${IMAGES}.tmp" || true
+    [ -f "${IMAGES}.tmp" ] && mv "${IMAGES}.tmp" "$IMAGES"
+    echo "$dst" >> "$IMAGES"
+    exit 0
+    ;;
+  run)
+    name=""
+    prev=""
+    env_args=()
+    for a in "$@"; do
+      if [ "$prev" = "--name" ]; then name="$a"; fi
+      case "$a" in -e) prev="-e"; continue ;; esac
+      if [ "$prev" = "-e" ]; then env_args+=("$a"); prev=""; continue; fi
+      prev="$a"
+    done
+    if [ -n "$name" ]; then
+      grep -vxF "$name" "$STATE" 2>/dev/null > "${STATE}.tmp" || true
+      [ -f "${STATE}.tmp" ] && mv "${STATE}.tmp" "$STATE"
+      echo "$name" >> "$STATE"
+      mark_running "$name"
+      local_e="${T_WORKSTATE}/env-${name}.txt"
+      : > "$local_e"
+      local_a=""
+      for a in "$@"; do
+        if [ "$local_a" = "1" ]; then
+          echo "$a" >> "$local_e"
+          local_a=""
+        elif [ "$a" = "-e" ]; then
+          local_a="1"
+        fi
+      done
+    fi
+    echo "fake-container-id"
+    exit 0
+    ;;
+  start)
+    name=""
+    for a in "$@"; do
+      case "$a" in -*) ;; *) name="$a" ;; esac
+    done
+    if grep -qxF "$name" "$STATE" 2>/dev/null; then mark_running "$name"; fi
+    exit 0
+    ;;
+  stop)
+    name=""
+    for a in "$@"; do
+      case "$a" in -*) ;; *) name="$a" ;; esac
+    done
+    mark_stopped "$name"
+    exit 0
+    ;;
+  restart)
+    name=""
+    for a in "$@"; do
+      case "$a" in -*) ;; *) name="$a" ;; esac
+    done
+    if grep -qxF "$name" "$STATE" 2>/dev/null; then mark_running "$name"; fi
+    exit 0
+    ;;
+  rm)
+    name=""
+    for a in "$@"; do
+      case "$a" in
+        -*) ;;
+        *) name="$a" ;;
+      esac
+    done
+    if [ -f "$STATE" ]; then
+      grep -vxF "$name" "$STATE" > "${STATE}.tmp" 2>/dev/null || true
+      [ -f "${STATE}.tmp" ] && mv "${STATE}.tmp" "$STATE"
+    fi
+    mark_stopped "$name"
+    rm -f "${T_WORKSTATE}/env-${name}.txt"
+    exit 0
+    ;;
+  inspect)
+    # used as: docker inspect -f '{{.State.Running}}' litellm
+    fmt=""
+    name=""
+    for a in "$@"; do
+      case "$a" in
+        '{{'*) fmt="$a" ;;
+        -*)    ;;
+        *)     name="$a" ;;
+      esac
+    done
+    if grep -qxF "$name" "$STATE" 2>/dev/null; then
+      case "$fmt" in
+        *Config.Env*)
+          [ -f "${T_WORKSTATE}/env-${name}.txt" ] && cat "${T_WORKSTATE}/env-${name}.txt"
+          ;;
+        *State.Running*)
+          if grep -qxF "$name" "$RUNNING" 2>/dev/null; then echo "true"; else echo "false"; fi
+          ;;
+        *State.Status*)
+          if grep -qxF "$name" "$RUNNING" 2>/dev/null; then echo "running"; else echo "exited"; fi
+          ;;
+        *RestartPolicy*)
+          echo "unless-stopped"
+          ;;
+      esac
+    fi
+    exit 0
+    ;;
+  network)
+    sub="${1:-}"; shift || true
+    # create/inspect/rm - always succeed (state is not tracked)
+    exit 0
+    ;;
+  exec)
+    # e.g. docker exec litellm-db pg_isready -U litellm -d litellm -> ready
+    exit 0
+    ;;
+  logs|images|version)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

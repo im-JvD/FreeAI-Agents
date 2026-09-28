@@ -1,0 +1,327 @@
+
+=================================================================
+=================================================================
+            Free AI Agents  |  Local AI Gateway Manager
+            BOT Version [ 3.0.0 ]
+=================================================================
+=================================================================
+
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart
+   3 - Stop
+   4 - Update ( re-download script + full reinstall, keeps keys & proxy )
+   5 - Show Status
+   6 - Remove ( Full wipe )
+   7 - Show Live Logs
+   8 - Config Manager ( proxy on/off - edit tokens - re-apply Claude config )
+   0 - Exit ( CTRL + C )
+
+
+
+   Which engine(s) do you want to install?
+     1 - LiteLLM proxy   (Docker, port 4000)   [default]
+     2 - OmniRoute        (Docker/Node, port 20128)
+     3 - Both
+
+
+[INFO] === FULL INSTALL: starting ===
+
+[INFO] [1/9] Checking WSL2 environment...
+[WARN] This does not look like a WSL kernel (/proc/version).
+[WARN] Continuing anyway - Windows/PowerShell integration may fail.
+[ OK ] WSL2 environment looks good.
+[INFO] [2/9] Installing Docker Engine (docker.io from Ubuntu apt repository)...
+apt-get: docker.io installed (stub)
+[INFO] [3/9] Configuring Iranian Docker Hub mirrors (/etc/docker/daemon.json)...
+[ OK ] Registry mirrors written:
+       - https://docker.arvancloud.ir
+       - https://docker.hub.iran.liara.run
+       - https://docker.iranserver.com
+[INFO]        Starting/restarting the Docker daemon...
+[ OK ] Docker daemon is up and running.
+
+[INFO] [4/9] API keys setup (5 providers)
+
+[INFO]        --- Windows proxy routing (optional) ---
+       If a proxy app runs on Windows (Clash / v2rayN / Hiddify / Nekoray),
+       LiteLLM can route ALL provider traffic through it - this fixes region
+       blocks (Google / Cerebras / ...) without a system-wide VPN.
+       Route provider traffic through your Windows proxy? [y/N]: [INFO]        Windows proxy: disabled (direct connections).
+       Press ENTER to skip a provider you do not use.
+       At least ONE key is required.
+
+[FAIL] At least ONE API key is required. Let's try again.
+
+
+[ OK ] Collected 5 API key(s):
+         Groq       : gsk_****abcd
+         OpenRouter : sk-o****abcd
+         Google AI  : AIza****abcd
+         Cerebras   : csk-****abcd
+         Mistral    : sk_m****5678
+
+[INFO]        Verifying API keys against the providers...
+[ OK ]          Groq: valid (HTTP 200)
+[ OK ]          OpenRouter: valid (HTTP 200)
+[ OK ]          Google AI: valid (HTTP 200)
+[ OK ]          Cerebras: valid (HTTP 200)
+[ OK ]          Mistral: valid (HTTP 200)
+[ OK ] LiteLLM master key generated and saved to: /tmp/litellm-test.zc2Y4q/home/.litellm/master_key.txt
+[ OK ] Dashboard login saved to: /tmp/litellm-test.zc2Y4q/home/.litellm/dashboard_credentials.txt
+[INFO] [5/9] Generating LiteLLM configuration: /tmp/litellm-test.zc2Y4q/home/.litellm/config.yaml
+[ OK ] config.yaml generated (only providers with keys are enabled).
+[INFO] [6/9] Pulling prebuilt LiteLLM image (no build step): ghcr.io/berriai/litellm:main-latest
+[INFO]        This may take several minutes on the first run...
+[ OK ] Image pulled successfully.
+[INFO] [7/9] Starting LiteLLM container on port 4000...
+[INFO]        Starting the Admin UI database (postgres:16-alpine)...
+[ OK ]        Database container 'litellm-db' started (restart policy: unless-stopped).
+[INFO]        Waiting for the database to accept connections...
+[ OK ]        Database is ready.
+[ OK ] Container 'litellm' started (restart policy: unless-stopped).
+[INFO]        Waiting for LiteLLM to become healthy (up to 120s)...
+[ OK ] LiteLLM is healthy: http://127.0.0.1:4000
+[INFO] [8/9] Setting up auto-start on boot + management CLI...
+[ OK ] Auto-start on WSL boot: systemd service: litellm.service (enabled)
+[ OK ] Management CLI installed: /usr/local/bin/freeagents  (try: freeagents status)
+[INFO] [9/9] Configuring Claude Code on the Windows side...
+[ OK ] Windows user profile detected: /mnt/c/Users/Test User
+[ OK ] Claude Code settings written: /mnt/c/Users/Test User/.claude/settings.json
+[ OK ] Default model: claude-gpt-oss-120b | background model: claude-gemini-2.0-flash
+[INFO]        Writing the LiteLLM profile into the Claude Desktop app...
+[INFO]        Removed an outdated desktop profile (old id).
+[ OK ]        Desktop profile written (configLibrary): /mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a119e.json
+
+=================================================================
+  INSTALLATION COMPLETED SUCCESSFULLY!
+=================================================================
+
+  LiteLLM endpoint (from Windows) : http://127.0.0.1:4000/v1
+
+  ADMIN PANEL (UI) - open in the WINDOWS browser:
+    URL       : http://127.0.0.1:4000/ui
+    Username  : admin
+    Password  : sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206
+    (the dashboard password IS the master key - no separate password exists)
+    saved to  : /tmp/litellm-test.zc2Y4q/home/.litellm/dashboard_credentials.txt
+
+  Master key (also saved to)      : /tmp/litellm-test.zc2Y4q/home/.litellm/master_key.txt
+  Master key                      : sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206
+  LiteLLM config file             : /tmp/litellm-test.zc2Y4q/home/.litellm/config.yaml
+  Claude Code settings (Windows)  : /mnt/c/Users/Test User/.claude/settings.json
+  Container name                  : litellm
+  Auto-start on WSL boot          : systemd service: litellm.service (enabled)
+  Windows proxy routing           : disabled
+  Admin UI database               : litellm-db (postgres, restart: unless-stopped)
+
+  MANAGEMENT COMMANDS (any terminal):
+    freeagents up | down | restart | status | logs | uninstall
+    freeagents          (re-opens this menu)
+
+  USEFUL COMMANDS (run inside WSL):
+    Live logs        : sudo docker logs -f litellm
+    Restart proxy    : sudo docker restart litellm
+    Stop proxy       : sudo docker stop litellm
+    Start proxy      : sudo docker start litellm
+    Test endpoint    : curl -s http://127.0.0.1:4000/v1/models \
+                         -H "Authorization: Bearer sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206"
+    Re-run this tool : bash "/home/user/FreeAI-Agents/setup.sh"
+
+  NEXT STEPS (on WINDOWS):
+    1. Install Claude Code (once):
+       irm https://claude.ai/install.ps1 | iex
+       (or: npm install -g @anthropic-ai/claude-code)
+    2. Open a NEW terminal, cd into any project folder.
+    3. Run: claude
+    4. Type /model to pick any proxy model (gateway discovery is on;
+       needs Claude Code v2.1.129+). Default model preconfigured.
+
+  CLAUDE DESKTOP APP (Cowork / Code inside the desktop app):
+    ALREADY CONFIGURED automatically (registry policy:
+    HKCU\SOFTWARE\Policies\Claude). Just (re)start the app -
+    the claude-* gateway models appear in Cowork's model picker.
+
+  NOTE: If you ever run 'wsl --shutdown', start Docker again with:
+        sudo service docker start   (auto if systemd is enabled)
+
+[ OK ] Done. Happy coding!
+
+=================================================================
+=================================================================
+            Free AI Agents  |  Local AI Gateway Manager
+            BOT Version [ 3.0.0 ]
+=================================================================
+=================================================================
+
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart
+   3 - Stop
+   4 - Update ( re-download script + full reinstall, keeps keys & proxy )
+   5 - Show Status
+   6 - Remove ( Full wipe )
+   7 - Show Live Logs
+   8 - Config Manager ( proxy on/off - edit tokens - re-apply Claude config )
+   0 - Exit ( CTRL + C )
+
+
+[INFO] Bye!
+    ok: exit code = 0
+    ok: contains: INSTALLATION COMPLETED SUCCESSFULLY
+    ok: contains: install -y docker.io
+    ok: contains: pull ghcr.io/berriai/litellm:main-latest
+    ok: contains: run -d --name litellm --restart unless-stopped -p 4000:4000
+    ok: contains: -v /tmp/litellm-test.zc2Y4q/home/.litellm/config.yaml:/app/config.yaml:ro
+    ok: contains: --config /app/config.yaml --port 4000
+    ok: contains: -e GROQ_API_KEY=gsk_test_groq_0123456789abcd
+    ok: contains: -e OPENROUTER_API_KEY=sk-or-test_0123456789abcd
+    ok: contains: -e GEMINI_API_KEY=AIzaTest0123456789abcd
+    ok: contains: -e CEREBRAS_API_KEY=csk-test_0123456789abcd
+    ok: contains: -e MISTRAL_API_KEY=sk_mistral_test012345678
+    ok: container registered
+    ok: file exists: /tmp/litellm-test.zc2Y4q/home/.litellm/config.yaml
+    ok: file exists: /tmp/litellm-test.zc2Y4q/home/.litellm/master_key.txt
+    ok: models match (claude-gpt-oss-120b, claude-gpt-oss-20b, claude-deepseek-v3.1, claude-deepseek-v3-0324, claude-gemini-2.0-flash, claude-llama3.1-70b, claude-codestral, claude-sonnet-4-5, claude-haiku-4-5)
+    ok: master key consistent (file == docker env)
+    ok: file exists: /tmp/litellm-test.zc2Y4q/home/.litellm/dashboard_credentials.txt
+    ok: contains: Username : admin
+    ok: contains: Password : sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206
+    ok: contains: Password  : sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206
+    ok: contains: -e UI_PASSWORD=sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206
+    ok: contains: -e UI_USERNAME=admin
+    ok: contains: -e UI_PASSWORD=sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206
+    ok: file exists: /tmp/litellm-test.zc2Y4q/home/.litellm/db_password.txt
+    ok: contains: run -d --name litellm-db --restart unless-stopped --network litellm-net
+    ok: contains: -e POSTGRES_USER=litellm
+    ok: contains: -v /tmp/litellm-test.zc2Y4q/home/.litellm/pgdata:/var/lib/postgresql/data
+    ok: contains: exec litellm-db pg_isready
+    ok: contains: -e DATABASE_URL=postgresql://litellm:
+    ok: contains: @litellm-db:5432/litellm
+    ok: contains: --network litellm-net
+    ok: contains: database_url: os.environ/DATABASE_URL
+    ok: file exists: /tmp/litellm-test.zc2Y4q/fakeroot/usr/local/bin/freeagents
+    ok: file exists: /tmp/litellm-test.zc2Y4q/fakeroot/usr/local/bin/litellm-boot.sh
+    ok: boot persistence configured (wsl.conf entry or systemd unit)
+    ok: daemon.json mirrors exact (/tmp/litellm-test.zc2Y4q/fakeroot/etc/docker/daemon.json)
+    ok: not contains: backed up
+    ok: file exists: /mnt/c/Users/Test User/.claude/settings.json
+    ok: Claude settings valid (/mnt/c/Users/Test User/.claude/settings.json)
+    ok: contains: Writing the LiteLLM profile into the Claude Desktop app...
+    ok: contains: Desktop profile written (configLibrary)
+    ok: contains: ALREADY CONFIGURED automatically
+    ok: file exists: /mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a119e.json
+    ok: file missing: /mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/litellm-free-ai-agents.json
+    ok: contains: Removed an outdated desktop profile (old id).
+    ok: Desktop profile valid (catalog ids + FreeAgents/LiteLLM labels)
+    ok: _meta: new entry added, legacy purged, applied pick NOT stolen
+    ok: contains: model_name: claude-sonnet-4-5
+    ok: contains: model_name: claude-haiku-4-5
+    ok: contains: model: groq/openai/gpt-oss-120b
+
+--- docker-calls.log ---
+service docker restart
+systemctl enable docker.service
+docker info
+docker inspect -f {{range .Config.Env}}{{println .}}{{end}} litellm
+docker image inspect ghcr.io/berriai/litellm:main-latest
+docker pull ghcr.io/berriai/litellm:main-latest
+docker network inspect litellm-net
+docker ps -a --format {{.Names}}
+docker run -d --name litellm-db --restart unless-stopped --network litellm-net -e POSTGRES_USER=litellm -e POSTGRES_PASSWORD=5593d9682b3a57d65b46862046d959ff -e POSTGRES_DB=litellm -v /tmp/litellm-test.zc2Y4q/home/.litellm/pgdata:/var/lib/postgresql/data postgres:16-alpine
+docker exec litellm-db pg_isready -U litellm -d litellm
+docker ps -a --format {{.Names}}
+docker run -d --name litellm --restart unless-stopped -p 4000:4000 -v /tmp/litellm-test.zc2Y4q/home/.litellm/config.yaml:/app/config.yaml:ro --network litellm-net -e LITELLM_MASTER_KEY=sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206 -e UI_USERNAME=admin -e UI_PASSWORD=sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206 -e DATABASE_URL=postgresql://litellm:5593d9682b3a57d65b46862046d959ff@litellm-db:5432/litellm -e GROQ_API_KEY=gsk_test_groq_0123456789abcd -e OPENROUTER_API_KEY=sk-or-test_0123456789abcd -e GEMINI_API_KEY=AIzaTest0123456789abcd -e CEREBRAS_API_KEY=csk-test_0123456789abcd -e MISTRAL_API_KEY=sk_mistral_test012345678 ghcr.io/berriai/litellm:main-latest --config /app/config.yaml --port 4000
+systemctl daemon-reload
+systemctl enable litellm.service
+
+--- apt-calls.log ---
+apt-get update -y
+apt-get install -y docker.io
+
+--- containers.txt ---
+litellm-db
+litellm
+
+--- generated config.yaml ---
+model_list:
+  # ---------------- Groq (fast inference) ----------------
+  # NOTE: model_name MUST contain 'claude' - the Claude Desktop app
+  #       model picker only keeps ids containing 'claude' or 'anthropic'.
+  - model_name: claude-gpt-oss-120b
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      api_base: https://api.groq.com/openai/v1
+  - model_name: claude-gpt-oss-20b
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+      api_base: https://api.groq.com/openai/v1
+  # ---------------- OpenRouter (free coding models) ----------------
+  - model_name: claude-deepseek-v3.1
+    litellm_params:
+      model: openrouter/deepseek/deepseek-chat-v3.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+      api_base: https://openrouter.ai/api/v1
+  - model_name: claude-deepseek-v3-0324
+    litellm_params:
+      model: openrouter/deepseek/deepseek-chat-v3-0324:free
+      api_key: os.environ/OPENROUTER_API_KEY
+      api_base: https://openrouter.ai/api/v1
+  # ---------------- Google AI Studio (Gemini) ----------------
+  - model_name: claude-gemini-2.0-flash
+    litellm_params:
+      model: gemini/gemini-2.0-flash
+      api_key: os.environ/GEMINI_API_KEY
+  # ---------------- Cerebras ----------------
+  - model_name: claude-llama3.1-70b
+    litellm_params:
+      model: cerebras/llama3.1-70b
+      api_key: os.environ/CEREBRAS_API_KEY
+      api_base: https://api.cerebras.ai/v1
+  # ---------------- Mistral ----------------
+  - model_name: claude-codestral
+    litellm_params:
+      model: mistral/codestral-latest
+      api_key: os.environ/MISTRAL_API_KEY
+      api_base: https://api.mistral.ai/v1
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      api_base: https://api.groq.com/openai/v1
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+      api_base: https://api.groq.com/openai/v1
+
+litellm_settings:
+  drop_params: true        # silently drop unsupported provider params
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+--- generated daemon.json (virtual) ---
+{
+  "registry-mirrors": [
+    "https://docker.arvancloud.ir",
+    "https://docker.hub.iran.liara.run",
+    "https://docker.iranserver.com"
+  ]
+}
+
+--- generated Claude settings.json ---
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
+    "ANTHROPIC_AUTH_TOKEN": "sk-50caa15a62ede57756fc9d1852981101eeb90375bdac23b6a0135b242a150206",
+    "ANTHROPIC_MODEL": "claude-gpt-oss-120b",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-gemini-2.0-flash",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-gpt-oss-120b",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-gpt-oss-120b",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-gemini-2.0-flash",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}

@@ -1,0 +1,39 @@
+SUITE RUN - 2026-09-27T20:58:53Z
+host: Linux 6.1.158+ | user: user | bash: 5.2.15(1)-release
+PASS  T00_static_checks
+PASS  T01_full_install_all_keys
+PASS  T02_install_groq_only
+PASS  T03_install_gemini_only
+PASS  T04_no_keys_retry_then_success
+PASS  T05_no_keys_three_attempts_fails
+PASS  T06_reinstall_replaces_container
+PASS  T07_full_uninstall
+PASS  T08_uninstall_idempotent
+PASS  T09_invalid_menu_choice
+PASS  T10_menu_quit
+PASS  T11_username_with_space
+PASS  T12_daemon_json_backup
+PASS  T13_powershell_fallback_path
+PASS  T14_health_check_timeout
+PASS  T15_pull_failure
+PASS  T16_docker_already_installed
+PASS  T17_crlf_self_heal
+PASS  T18_autostart_systemd_unit
+PASS  T19_management_cli
+PASS  T20_autostart_wslconf_boot
+PASS  T21_pull_failure_with_local_image
+PASS  T22_ghcr_mirror_fallback
+PASS  T23_reinstall_keeps_existing_keys
+PASS  T24_ui_db_disabled
+PASS  T26_key_verification_rejects_bad_keys
+PASS  T27_key_verification_all_valid
+PASS  T28_doctor_command
+PASS  T29_windows_proxy_enabled
+PASS  T30_windows_proxy_replace_and_off
+PASS  T31_desktop_policy_auto_config
+PASS  T32_menu_and_config_manager
+PASS  T33_both_engines_single_prompt
+PASS  T34_menu_operations
+
+TOTAL: 34 passed, 0 failed, 0 skipped
+E2E litellm_real: PASS

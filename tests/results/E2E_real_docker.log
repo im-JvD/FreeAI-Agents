@@ -1,0 +1,6 @@
+[DOCKER-E2E] ===============================================================
+[DOCKER-E2E] REAL Docker end-to-end test (WSL2)
+[DOCKER-E2E] ===============================================================
+[DOCKER-E2E] [0] preflight
+[DOCKER-E2E] SKIP - not running inside WSL (/proc/version has no Microsoft entry).
+[DOCKER-E2E] SKIP - this test targets a real WSL2 Ubuntu distribution.
