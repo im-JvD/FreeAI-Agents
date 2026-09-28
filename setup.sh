@@ -48,7 +48,7 @@ set -euo pipefail
 #-------------------------------------------------------------------------------
 # Constants
 #-------------------------------------------------------------------------------
-FREE_AGENTS_VERSION="0.0.8"
+FREE_AGENTS_VERSION="0.0.9"
 REPO="im-JvD/FreeAI-Agents"
 
 # THE single model id handed to Claude. It must start with "claude" so that
@@ -1049,9 +1049,11 @@ pull_litellm_image() {
       log_ok "Image pulled successfully."
       return 0
     fi
-    # Exponential backoff: 5s, 10s, 15s...
+    # Exponential backoff: 5s, 10s, 15s... (faster in test mode)
     if [ "$i" -lt "$attempts" ]; then
       local wait=$((i * 5))
+      # In test mode (FREEAGENTS_SKIP_WINDOWS=1) use 1s to keep suite fast
+      if [ "${FREEAGENTS_SKIP_WINDOWS:-0}" = "1" ]; then wait=1; fi
       log_info "       Waiting ${wait}s before retry..."
       sleep "$wait"
     fi

@@ -69,7 +69,7 @@ bash setup.sh
 ```
 =================================================================
             Free AI Agents  |  Local AI Gateway Manager
-            Script Version [ 0.0.8 ]   LiteLLM + OmniRoute
+            Script Version [ 0.0.9 ]   LiteLLM + OmniRoute
 =================================================================
 
    1 - Install  ( LiteLLM / OmniRoute / Both )
@@ -252,7 +252,7 @@ freeagents up|down|restart
 freeagents logs [litellm|omniroute]
 freeagents doctor [litellm|omniroute]
 freeagents credentials
-freeagents update       # از 0.0.8: دانلود اسکریپت جدید + exec با نسخه جدید + نصب مجدد (کلیدها و پراکسی حفظ، همه‌چیز به‌روز: CLI، boot.sh، live_test.sh)
+freeagents update       # از 0.0.9: دانلود اسکریپت جدید + exec با نسخه جدید + نصب مجدد (کلیدها و پراکسی حفظ، همه‌چیز به‌روز: CLI، boot.sh، live_test.sh)
 freeagents uninstall    # حذف کامل
 ```
 
