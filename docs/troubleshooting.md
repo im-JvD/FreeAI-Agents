@@ -113,14 +113,29 @@ LITELLM_PORT=4010 bash setup.sh    # نصب مجدد روی پورت جدید
 
 ## 🟢 خطاهای گیت‌وی OmniRoute (npm)
 
-### `npm install` خطا می‌دهد (`ETIMEDOUT` / `403` / `EACCES`)
+### `npm install` خطا می‌دهد (`ETIMEDOUT` / `403` / `EACCES` / `sudo: npm: command not found`)
 
-اسکریپت اول از `npmjs.org` نصب می‌کند و اگر شکست بخورد، خودکار `registry.npmmirror.com` را امتحان می‌کند. برای تلاش دوباره یا نصب اجباری:
+اسکریپت اول از `npmjs.org` نصب می‌کند و اگر شکست بخورد، خودکار `registry.npmmirror.com` را امتحان می‌کند. نسخه جدید همچنین مشکل `sudo: npm: command not found` (وقتی Node با nvm یا NodeSource نصب شده ولی sudo مسیر npm را نمی‌بیند) را خودکار حل می‌کند — با مسیر کامل npm و `sudo env PATH`.
+
+برای تلاش دوباره یا نصب اجباری:
 
 ```bash
 OMNIROUTE_FORCE_NPM_INSTALL=1 bash setup.sh
-# یا دستی:
-sudo npm install -g omniroute --registry=https://registry.npmmirror.com
+# یا دستی (با مسیر کامل npm):
+which npm
+sudo $(which npm) install -g omniroute --registry=https://registry.npmmirror.com
+# یا بدون sudo (اگر از nvm استفاده می‌کنید):
+npm install -g omniroute
+```
+
+اگر با nvm نصب کرده‌اید و `omniroute: command not found` می‌گیرید:
+
+```bash
+npm config set prefix ~/.npm-global
+echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+npm install -g omniroute
+sudo ln -sf ~/.npm-global/bin/omniroute /usr/local/bin/omniroute
 ```
 
 ### OmniRoute بالا نمی‌آید / لحظهٔ بوت کرش می‌کند

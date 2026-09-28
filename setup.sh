@@ -48,7 +48,7 @@ set -euo pipefail
 #-------------------------------------------------------------------------------
 # Constants
 #-------------------------------------------------------------------------------
-FREE_AGENTS_VERSION="0.0.4"
+FREE_AGENTS_VERSION="0.0.5"
 REPO="im-JvD/FreeAI-Agents"
 
 # THE single model id handed to Claude. It must start with "claude" so that
@@ -1268,6 +1268,23 @@ npm_install_omniroute() {
     log_ok "       OmniRoute CLI already installed ($(command -v omniroute))."
     return 0
   fi
+  # Find npm binary robustly (sudo's secure_path may not include npm, e.g. nvm or /usr/local/bin)
+  local NPM_BIN=""
+  NPM_BIN="$(command -v npm 2>/dev/null || which npm 2>/dev/null || true)"
+  if [ -z "$NPM_BIN" ]; then
+    die "npm was not found next to Node.js. Install the 'npm' package and re-run."
+  fi
+  log_info "       Using npm: ${NPM_BIN} ($( $NPM_BIN --version 2>/dev/null || echo unknown))"
+  # Check if sudo can see npm; if not, we will use full path with env PATH
+  local SUDO_NPM_OK=0
+  if $SUDO npm --version >/dev/null 2>&1; then
+    SUDO_NPM_OK=1
+  elif $SUDO "$NPM_BIN" --version >/dev/null 2>&1; then
+    SUDO_NPM_OK=0
+  else
+    log_warn "       sudo cannot find npm in its secure_path, will use full path: ${NPM_BIN}"
+  fi
+
   local reg out args=()
   for reg in "${NPM_REGISTRIES[@]}"; do
     args=()
@@ -1277,15 +1294,44 @@ npm_install_omniroute() {
     else
       log_info "       npm install -g ${OMNI_NPM_PACKAGE} (default registry)..."
     fi
-    out="$($SUDO npm install -g "${args[@]}" "$OMNI_NPM_PACKAGE" 2>&1)" && {
-      log_ok "       OmniRoute installed: $(command -v omniroute)"
+    # Try 4 methods in order to handle sudo PATH issues (common with nvm / NodeSource)
+    out=""
+    if [ "$SUDO_NPM_OK" -eq 1 ]; then
+      out="$($SUDO npm install -g "${args[@]}" "$OMNI_NPM_PACKAGE" 2>&1)" && {
+        log_ok "       OmniRoute installed: $(command -v omniroute || echo omniroute)"
+        return 0
+      }
+    fi
+    # Method 2: sudo with full path
+    out="$($SUDO "$NPM_BIN" install -g "${args[@]}" "$OMNI_NPM_PACKAGE" 2>&1)" && {
+      log_ok "       OmniRoute installed: $(command -v omniroute || echo omniroute)"
       return 0
     }
-    log_warn "       npm install failed on '${reg:-default}': $(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+    # Method 3: sudo -E with PATH preserved
+    out="$( $SUDO env "PATH=$PATH" "$NPM_BIN" install -g "${args[@]}" "$OMNI_NPM_PACKAGE" 2>&1)" && {
+      log_ok "       OmniRoute installed: $(command -v omniroute || echo omniroute)"
+      return 0
+    }
+    # Method 4: without sudo (works if npm prefix is user-writable, e.g. nvm)
+    out="$("$NPM_BIN" install -g "${args[@]}" "$OMNI_NPM_PACKAGE" 2>&1)" && {
+      log_ok "       OmniRoute installed: $(command -v omniroute || echo omniroute)"
+      # Ensure the binary is in a sudo-visible location or add to PATH
+      if ! have omniroute && [ -n "${HOME:-}" ] && [ -x "${HOME}/.npm-global/bin/omniroute" ]; then
+        $SUDO ln -sf "${HOME}/.npm-global/bin/omniroute" /usr/local/bin/omniroute 2>/dev/null || true
+      fi
+      return 0
+    }
+    log_warn "       npm install failed on '${reg:-default}': $(printf '%s' "$out" | tail -5 | tr '\n' ' ' | cut -c1-200)"
   done
   die "Could not install the OmniRoute npm package (${OMNI_NPM_PACKAGE}).
+         Tried npm at ${NPM_BIN} with and without sudo, default and mirror registries.
          Check the network/npm registry and re-run, or install it manually:
-           npm install -g ${OMNI_NPM_PACKAGE}"
+           ${NPM_BIN} install -g ${OMNI_NPM_PACKAGE}
+         Or with sudo:
+           sudo ${NPM_BIN} install -g ${OMNI_NPM_PACKAGE}
+         If you use nvm, ensure npm global bin is in PATH:
+           export PATH="\$HOME/.npm-global/bin:\$PATH"
+           npm config set prefix ~/.npm-global"
 }
 
 #-------------------------------------------------------------------------------
