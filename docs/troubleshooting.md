@@ -238,9 +238,15 @@ freeagents      # باز کردن منو
 
 `settings.json`، پروفایل دسکتاپ (`appliedId` در `_meta.json`) و همهٔ توکن‌ها هم‌زمان به‌روز می‌شوند. بعد از تعویض، اپ‌های Claude را کامل ببندید و باز کنید.
 
-### خطای `Add credits or update billing to continue.`
+### خطای `Add credits or update billing to continue.` / `SambanovaException - A payment method is required`
 
-این خطا از **OpenRouter** (یا گاهی Groq) می‌آید وقتی حساب شما اعتبار ندارد. LiteLLM سعی می‌کند با `simple-shuffle` و `num_retries` به provider بعدی برود، ولی اگر همه providerها به خاطر تحریم یا بی‌اعتباری fail شوند، آخرین خطا (همین `Add credits`) نمایش داده می‌شود.
+این خطا از **OpenRouter** (`Add credits...`) یا **SambaNova** (`A payment method is required`) می‌آید وقتی حساب شما اعتبار یا روش پرداخت ندارد. از نسخه 0.0.7 به بعد LiteLLM با `enable_weighted_failover: true` و `fallbacks: claude-freeagents -> claude-freeagents` سعی می‌کند خودکار به provider بعدی (Groq, Gemini, Cerebras, Mistral و...) برود، ولی اگر همه providerها به خاطر تحریم یا بی‌اعتباری fail شوند، آخرین خطا نمایش داده می‌شود.
+
+**قبل از 0.0.7** گاهی می‌دیدید:
+```
+LiteLLM: model group 'claude-freeagents' failed with the error above. No fallback was attempted.
+```
+این به خاطر نبود `enable_weighted_failover` بود — از 0.0.7 فیکس شد و fallback داخل همان گروه مدل انجام می‌شود.
 
 راه‌حل:
 
@@ -264,6 +270,41 @@ freeagents
 freeagents restart
 freeagents doctor
 ```
+
+### خطای `Gateway was unreachable: ERR_CONNECTION_REFUSED` (OmniRoute روی 20128)
+
+این یعنی سرویس OmniRoute خوابیده یا کرش کرده:
+
+```bash
+freeagents status          # ببین OmniRoute running هست یا STOPPED
+freeagents logs omniroute  # لاگ زنده - خطای JWT_SECRET کوتاه یا پورت اشغال؟
+sudo ss -ltnp | grep 20128 # چه چیزی پورت را گرفته؟
+cat ~/.omniroute/.env | grep -E 'JWT|API_KEY|PORT'  # secretها حداقل طول را دارند؟
+# حداقل‌ها: JWT_SECRET >=32, API_KEY_SECRET >=16, INITIAL_PASSWORD >=8
+# اگر کوتاه هستند:
+freeagents update          # از 0.0.6 به بعد خودکار regenerate می‌کند
+# یا دستی:
+rm -rf ~/.omniroute && freeagents
+# منو -> 1 -> 2 (OmniRoute)
+```
+
+همچنین اگر پراکسی ویندوز فعال است، از 0.0.6 به بعد هم `HTTP_PROXY` و هم `http_proxy` (حروف بزرگ و کوچک) برای هر دو گیت‌وی ست می‌شود — اگر قبل از 0.0.6 پراکسی فقط برای LiteLLM کار می‌کرد، به‌روزرسانی کنید.
+
+### خطای `Model discovery — found 0 models; 1 of yours not in the list` / `Not returned by discovery: claude-freeagents`
+
+این از Claude Desktop می‌آید وقتی `/v1/models` گیت‌وی خالی برمی‌گرداند یا `claude-freeagents` را ندارد:
+
+```bash
+curl -s http://127.0.0.1:4000/v1/models -H "Authorization: Bearer $(cat ~/.litellm/master_key.txt)" | python3 -m json.tool
+curl -s http://127.0.0.1:20128/v1/models -H "Authorization: Bearer $(cat ~/.free-ai-agents/omniroute_claude.key)" | python3 -m json.tool
+# باید claude-freeagents را ببینید
+
+freeagents doctor          # تست زنده هر دو گیت‌وی
+freeagents status
+freeagents restart
+```
+
+اگر قبل از 0.0.6 بودید و خطای `Ambiguous model 'claude-sonnet-4-5'` می‌دیدید، نسخه جدید فقط `claude-freeagents` را تبلیغ می‌کند و این خطا حل شده.
 
 ### مدل جواب نمی‌دهد (`429` / `quota exceeded`)
 

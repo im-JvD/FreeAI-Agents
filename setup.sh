@@ -48,7 +48,7 @@ set -euo pipefail
 #-------------------------------------------------------------------------------
 # Constants
 #-------------------------------------------------------------------------------
-FREE_AGENTS_VERSION="0.0.6"
+FREE_AGENTS_VERSION="0.0.7"
 REPO="im-JvD/FreeAI-Agents"
 
 # THE single model id handed to Claude. It must start with "claude" so that
@@ -922,6 +922,9 @@ generate_litellm_config() {
     echo ""
     echo "# Router behaviour: if one provider fails or is rate-limited, the next"
     echo "# deployment in the '${MODEL_ID}' group is tried automatically."
+    echo "# enable_weighted_failover ensures we retry OTHER deployments in the SAME"
+    echo "# model group (claude-freeagents) before giving up - crucial for billing/"
+    echo "# quota errors like Sambanova 'payment required' or OpenRouter 'Add credits'."
     echo "router_settings:"
     echo "  routing_strategy: simple-shuffle"
     echo "  num_retries: 3"
@@ -930,6 +933,9 @@ generate_litellm_config() {
     echo "  cooldown_time: 30"
     echo "  timeout: 600"
     echo "  enable_pre_call_checks: true"
+    echo "  enable_weighted_failover: true"
+    echo "  fallbacks:"
+    echo "    - ${MODEL_ID}: ["${MODEL_ID}"]"
     echo ""
     echo "litellm_settings:"
     echo "  drop_params: true          # silently drop unsupported provider params"
@@ -3137,6 +3143,21 @@ config_manager() {
 # UPDATE: re-download from THIS repository, then reinstall (keys kept)
 #===============================================================================
 cmd_update() {
+  # If we are already running the freshly downloaded script (exec'd below),
+  # skip the download and go straight to reinstall with new code
+  if [ "${FREEAGENTS_UPDATE_EXEC:-0}" = "1" ]; then
+    log_info "=== UPDATE: running with new script v${FREE_AGENTS_VERSION} ==="
+    load_provider_keys || true
+    load_windows_proxy
+    log_info "=== Re-running the installation (keys & proxy are KEPT) ==="
+    local engine="both"
+    [ "$(configured_provider_count)" -ge 1 ] || log_warn "No stored provider keys - the installer will ask again."
+    if ! litellm_installed && omni_installed; then engine="omniroute"; fi
+    if litellm_installed && ! omni_installed; then engine="litellm"; fi
+    full_install "$engine"
+    return 0
+  fi
+
   printf "   Re-download the manager from %s and reinstall? Keys and the\n" "$REPO"
   printf "   Windows proxy setting are KEPT. Continue? [y/N]: "
   local answer=""
@@ -3166,19 +3187,15 @@ cmd_update() {
   else
     mv "$tmp" "$SCRIPT_PATH"
     chmod +x "$SCRIPT_PATH" 2>/dev/null || true
-    log_ok "Script updated: ${SCRIPT_PATH}"
+    log_ok "Script updated: ${SCRIPT_PATH} -> v$(grep -m1 'FREE_AGENTS_VERSION=' "$SCRIPT_PATH" | cut -d'"' -f2)"
   fi
   cp -f "$SCRIPT_PATH" "$MANAGER_COPY" 2>/dev/null || true
   chmod 755 "$MANAGER_COPY" 2>/dev/null || true
-
-  load_provider_keys || true
-  load_windows_proxy
-  log_info "=== Re-running the installation (keys & proxy are KEPT) ==="
-  local engine="both"
-  [ "$(configured_provider_count)" -ge 1 ] || log_warn "No stored provider keys - the installer will ask again."
-  if ! litellm_installed && omni_installed; then engine="omniroute"; fi
-  if litellm_installed && ! omni_installed; then engine="litellm"; fi
-  full_install "$engine"
+  # Also update the freeagents CLI immediately so even if reinstall fails, CLI is new
+  write_management_cli || true
+  log_info "Re-executing with new script to apply updates (v$(grep -m1 'FREE_AGENTS_VERSION=' "$SCRIPT_PATH" | cut -d'"' -f2))..."
+  # Exec new script with flag to avoid download loop - new script's full_install will run with new code
+  FREEAGENTS_UPDATE_EXEC=1 exec bash "$SCRIPT_PATH" update
 }
 
 #===============================================================================
