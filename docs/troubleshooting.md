@@ -44,25 +44,53 @@ bash setup.sh
 
 ### `docker pull` خطای 403، `toomanyrequests` یا `TLS handshake timeout` می‌دهد
 
-اسکریپت ایمیج را از `ghcr.io` می‌گیرد (میرورهای `daemon.json` فقط برای داکرهاب هستند، نه ghcr). خطای `TLS handshake timeout` معمولاً **موقتی** است؛ اسکریپت خودش ۳ بار تلاش می‌کند و اگر ایمیج از نصب قبلی روی سیستم باشد، با آن ادامه می‌دهد.
+اسکریپت ایمیج را از `ghcr.io` می‌گیرد (میرورهای `daemon.json` فقط برای داکرهاب هستند، نه ghcr). خطای `TLS handshake timeout` در ایران **بسیار رایج** است چون `ghcr.io` گاهی کند یا فیلتر می‌شود. نسخهٔ جدید اسکریپت خودش این مشکل را تا حد زیادی حل می‌کند:
 
-راه‌های حل به ترتیب:
+- **۵ بار تلاش خودکار** با backoff افزایشی (۵، ۱۰، ۱۵ ثانیه)
+- اگر ایمیج از نصب قبلی روی سیستم باشد، با همان ادامه می‌دهد
+- **میرورهای خودکار ghcr** بدون نیاز به env: `ghcr.nju.edu.cn`، `ghcr.m.daocloud.io` و `docker.io/berriai/litellm` به‌ترتیب امتحان می‌شوند
+- اگر پراکسی ویندوز (Clash/v2rayN/Hiddify) در مرحلهٔ ۴ فعال باشد، اسکریپت داکر دیمن را هم روی پراکسی تنظیم می‌کند (`/etc/systemd/system/docker.service.d/http-proxy.conf`) و pull را با پراکسی امتحان می‌کند
+
+راه‌های حل به ترتیب (جدید → قدیمی):
 
 ```bash
-# ۱) اتصال به ghcr را بسنجید و دوباره نصاب را اجرا کنید (اغلب همان بار اول حل می‌شود)
-curl -I https://ghcr.io/v2/
+# ۱) پراکسی ویندوز را در نصب فعال کنید (بهترین راه برای ایران):
+#    در مرحلهٔ "Route provider traffic through your Windows proxy?" جواب y بدهید
+#    و پراکسی ویندوز را روی حالت Allow LAN بگذارید، سپس دوباره اجرا کنید
 bash setup.sh
 
-# ۲) VPN سمت ویندوز بزنید و دوباره اجرا کنید
+# ۲) اتصال به ghcr و میرورها را بسنجید:
+curl -I https://ghcr.io/v2/
+curl -I https://ghcr.nju.edu.cn/v2/
+curl -I https://ghcr.m.daocloud.io/v2/
+# اگر میرور جواب داد، دوباره نصاب را اجرا کنید - خودش میرور را امتحان می‌کند
+bash setup.sh
 
-# ۳) از یک میرور ghcr استفاده کنید (مثلاً میرور دانشگاه نانجینگ چین):
+# ۳) VPN سمت ویندوز بزنید و دوباره اجرا کنید
+
+# ۴) میرور را صریحاً اجبار کنید (اگر خودکار کار نکرد):
 LITELLM_GHCR_MIRROR=ghcr.nju.edu.cn bash setup.sh
+# یا:
+LITELLM_GHCR_MIRROR=ghcr.m.daocloud.io bash setup.sh
 
-# ۴) یا ایمیج را کامل خودتان انتخاب کنید:
-LITELLM_IMAGE=<registry>/berriai/litellm:main-latest bash setup.sh
+# ۵) pull دستی با پراکسی (اگر پراکسی ویندوز دارید):
+#    IP ویندوز را از WSL بگیرید:
+ip route show default | awk '{print $3}'
+#    سپس:
+export HTTP_PROXY=http://<WINDOWS_IP>:7890 HTTPS_PROXY=http://<WINDOWS_IP>:7890
+sudo -E docker pull ghcr.io/berriai/litellm:main-latest
+#    بعد دوباره نصاب را اجرا کنید - ایمیج لوکال را تشخیص می‌دهد و ادامه می‌دهد
+bash setup.sh
 
-# ۵) تعداد تلاش‌های مجدد هم قابل تغییر است:
-LITELLM_PULL_RETRIES=5 bash setup.sh
+# ۶) یا ایمیج را کامل خودتان انتخاب کنید:
+LITELLM_IMAGE=ghcr.nju.edu.cn/berriai/litellm:main-latest bash setup.sh
+
+# ۷) تعداد تلاش‌های مجدد هم قابل تغییر است (پیش‌فرض ۵):
+LITELLM_PULL_RETRIES=8 bash setup.sh
+
+# ۸) اگر tarball دارید:
+docker load -i litellm.tar
+bash setup.sh
 ```
 
 ### `Cannot connect to the Docker daemon` / `docker: command not found`

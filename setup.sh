@@ -48,7 +48,7 @@ set -euo pipefail
 #-------------------------------------------------------------------------------
 # Constants
 #-------------------------------------------------------------------------------
-FREE_AGENTS_VERSION="4.0.0"
+FREE_AGENTS_VERSION="0.0.4"
 REPO="im-JvD/FreeAI-Agents"
 
 # THE single model id handed to Claude. It must start with "claude" so that
@@ -397,7 +397,7 @@ get_windows_localappdata() {
 }
 
 check_environment() {
-  log_info "[1/7] Checking the environment..."
+  log_info "[1/9] Checking the environment..."
   if ! grep -qi "microsoft" /proc/version 2>/dev/null; then
     log_warn "This does not look like a WSL kernel (/proc/version)."
     log_warn "Continuing anyway - the Windows integration may fail."
@@ -418,7 +418,7 @@ check_environment() {
 # Docker (apt repo, NOT get.docker.com) + Iranian mirrors
 #-------------------------------------------------------------------------------
 install_docker() {
-  log_info "[2/7] Installing Docker Engine (docker.io from the Ubuntu apt repository)..."
+  log_info "[2/9] Installing Docker Engine (docker.io from the Ubuntu apt repository)..."
   if ! command -v docker >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     $SUDO apt-get update -y
@@ -429,7 +429,7 @@ install_docker() {
 }
 
 configure_docker_mirrors() {
-  log_info "[3/7] Configuring Iranian Docker Hub mirrors (${DAEMON_JSON})..."
+  log_info "[3/9] Configuring Iranian Docker Hub mirrors (${DAEMON_JSON})..."
   $SUDO mkdir -p /etc/docker
 
   if [ -f "$DAEMON_JSON" ] || $SUDO test -f "$DAEMON_JSON" 2>/dev/null; then
@@ -450,6 +450,22 @@ configure_docker_mirrors() {
 
   log_ok "Registry mirrors written:"
   for m in "${REGISTRY_MIRRORS[@]}"; do echo "       - ${m}"; done
+
+  # If a Windows proxy is configured, also configure Docker daemon to use it
+  # for pulling from ghcr.io (which is often blocked/TLS-timeout in Iran).
+  # This is done via systemd drop-in if systemd is available.
+  if [ -n "${WIN_PROXY_URL:-}" ] && [ -d /run/systemd/system ] && have systemctl; then
+    local proxy_dir="/etc/systemd/system/docker.service.d"
+    $SUDO mkdir -p "$proxy_dir"
+    local proxy_conf="${proxy_dir}/http-proxy.conf"
+    # Backup existing proxy conf if any
+    if $SUDO test -f "$proxy_conf" 2>/dev/null; then
+      $SUDO cp "$proxy_conf" "${proxy_conf}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    fi
+    printf '[Service]\nEnvironment="HTTP_PROXY=%s"\nEnvironment="HTTPS_PROXY=%s"\nEnvironment="http_proxy=%s"\nEnvironment="https_proxy=%s"\nEnvironment="NO_PROXY=localhost,127.0.0.1,::1"\nEnvironment="no_proxy=localhost,127.0.0.1,::1"\n'       "$WIN_PROXY_URL" "$WIN_PROXY_URL" "$WIN_PROXY_URL" "$WIN_PROXY_URL"       | $SUDO tee "$proxy_conf" >/dev/null
+    log_ok "Docker daemon proxy configured: ${WIN_PROXY_URL} (systemd drop-in)"
+    $SUDO systemctl daemon-reload 2>/dev/null || true
+  fi
 }
 
 start_docker_daemon() {
@@ -723,7 +739,7 @@ offer_key_reentry() {
 
 collect_keys() {
   echo
-  log_info "[4/7] API keys setup (${#PROVIDER_SPECS[@]} supported providers)"
+  log_info "[4/9] API keys setup (${#PROVIDER_SPECS[@]} supported providers)"
   load_windows_proxy
   configure_windows_proxy
 
@@ -863,7 +879,7 @@ generate_master_key() {
 # config.yaml: ONE model (claude-freeagents) backed by every configured provider
 #-------------------------------------------------------------------------------
 generate_litellm_config() {
-  log_info "[5/7] Generating the LiteLLM configuration: ${LITELLM_CONFIG}"
+  log_info "[5/9] Generating the LiteLLM configuration: ${LITELLM_CONFIG}"
   mkdir -p "$LITELLM_DIR"
 
   local p models spec mname ctx maxout api_base env_name dep_index=0
@@ -1010,14 +1026,16 @@ remove_existing_container() {
 }
 
 pull_litellm_image() {
-  log_info "[5/7] Pulling the prebuilt LiteLLM image: ${LITELLM_IMAGE}"
+  log_info "[6/9] Pulling prebuilt LiteLLM image (no build step): ${LITELLM_IMAGE}"
+  log_info "       This may take several minutes on the first run..."
   local have_local=0
   if $SUDO docker image inspect "$LITELLM_IMAGE" >/dev/null 2>&1; then
     have_local=1
     log_ok "       Image already exists locally (from a previous install)."
   fi
-  local attempts="${LITELLM_PULL_RETRIES:-3}"
-  is_number "$attempts" || attempts=3
+  # Default retries increased to 5 for Iranian networks (TLS handshake timeout is common)
+  local attempts="${LITELLM_PULL_RETRIES:-5}"
+  is_number "$attempts" || attempts=5
   attempts=$((attempts < 1 ? 1 : attempts))
 
   local i
@@ -1027,7 +1045,12 @@ pull_litellm_image() {
       log_ok "Image pulled successfully."
       return 0
     fi
-    [ "$i" -lt "$attempts" ] && sleep 5
+    # Exponential backoff: 5s, 10s, 15s...
+    if [ "$i" -lt "$attempts" ]; then
+      local wait=$((i * 5))
+      log_info "       Waiting ${wait}s before retry..."
+      sleep "$wait"
+    fi
   done
 
   if [ "$have_local" -eq 1 ]; then
@@ -1035,22 +1058,76 @@ pull_litellm_image() {
     return 0
   fi
 
-  if [ -n "${LITELLM_GHCR_MIRROR:-}" ]; then
-    local mirror_image="${LITELLM_GHCR_MIRROR%/}/berriai/litellm:main-latest"
-    log_warn "       Trying the ghcr fallback mirror: ${mirror_image}"
-    if $SUDO docker pull "$mirror_image" && $SUDO docker tag "$mirror_image" "$LITELLM_IMAGE"; then
-      log_ok "Image pulled via the mirror and tagged as ${LITELLM_IMAGE}."
+  # If Windows proxy is configured, try pulling with proxy env vars (helps when
+  # docker daemon proxy drop-in was just created or for non-systemd setups)
+  if [ -n "${WIN_PROXY_URL:-}" ]; then
+    log_warn "       Trying docker pull with Windows proxy: ${WIN_PROXY_URL}"
+    if HTTP_PROXY="$WIN_PROXY_URL" HTTPS_PROXY="$WIN_PROXY_URL" http_proxy="$WIN_PROXY_URL" https_proxy="$WIN_PROXY_URL"        $SUDO -E docker pull "$LITELLM_IMAGE"; then
+      log_ok "Image pulled successfully via Windows proxy."
       return 0
     fi
   fi
 
-  die "Image pull failed after ${attempts} attempt(s). Fixes, in order:
+  # Automatic fallback mirrors (no env var required) - crucial for Iran
+  # ghcr.io is often blocked or TLS-timeout; these mirrors cache the same image
+  local mirrors=()
+  if [ -n "${LITELLM_GHCR_MIRROR:-}" ]; then
+    mirrors+=("${LITELLM_GHCR_MIRROR%/}")
+  fi
+  # Hardcoded known-good mirrors (tried in order)
+  mirrors+=("ghcr.nju.edu.cn" "ghcr.m.daocloud.io" "ghcr.mirror.kubesphere.com")
+
+  local m mirror_image
+  for m in "${mirrors[@]}"; do
+    # Skip empty and duplicate of primary registry
+    [ -z "$m" ] && continue
+    case "$m" in
+      ghcr.io) continue ;;
+    esac
+    mirror_image="${m}/berriai/litellm:main-latest"
+    log_warn "       Trying ghcr fallback mirror: ${mirror_image}"
+    if $SUDO docker pull "$mirror_image"; then
+      $SUDO docker tag "$mirror_image" "$LITELLM_IMAGE" 2>/dev/null || true
+      log_ok "Image pulled via mirror ${m} and tagged as ${LITELLM_IMAGE}."
+      return 0
+    fi
+    # Also try with proxy if available
+    if [ -n "${WIN_PROXY_URL:-}" ]; then
+      log_warn "       Trying mirror ${mirror_image} via proxy..."
+      if HTTP_PROXY="$WIN_PROXY_URL" HTTPS_PROXY="$WIN_PROXY_URL" http_proxy="$WIN_PROXY_URL" https_proxy="$WIN_PROXY_URL"          $SUDO -E docker pull "$mirror_image"; then
+        $SUDO docker tag "$mirror_image" "$LITELLM_IMAGE" 2>/dev/null || true
+        log_ok "Image pulled via mirror ${m} + proxy and tagged as ${LITELLM_IMAGE}."
+        return 0
+      fi
+    fi
+  done
+
+  # Last resort: try docker.io (some builds are also pushed there)
+  local docker_io_image="docker.io/berriai/litellm:main-latest"
+  log_warn "       Trying Docker Hub fallback: ${docker_io_image}"
+  if $SUDO docker pull "$docker_io_image"; then
+    $SUDO docker tag "$docker_io_image" "$LITELLM_IMAGE" 2>/dev/null || true
+    log_ok "Image pulled via Docker Hub and tagged as ${LITELLM_IMAGE}."
+    return 0
+  fi
+
+  die "Image pull failed after ${attempts} attempt(s) + mirrors. Fixes, in order:
          1. Simply re-run the installer - TLS timeouts are often transient.
          2. Check your internet connection inside WSL:  curl -I https://ghcr.io/v2/
+            Also try:  curl -I https://ghcr.nju.edu.cn/v2/  (mirror)
          3. Turn a VPN on (on the WINDOWS side) and re-run the installer.
-         4. Use a ghcr mirror:   LITELLM_GHCR_MIRROR=ghcr.nju.edu.cn bash setup.sh
-         5. Use a custom image:  LITELLM_IMAGE=<registry>/berriai/litellm:main-latest bash setup.sh"
+            If you already have Clash/v2rayN/Hiddify with Allow LAN, enable
+            Windows proxy in the installer (question at step 4/9) and re-run.
+         4. Use a ghcr mirror explicitly:   LITELLM_GHCR_MIRROR=ghcr.nju.edu.cn bash setup.sh
+            Other mirrors to try: ghcr.m.daocloud.io, ghcr.mirror.kubesphere.com
+         5. Manual pull with proxy (if you have proxy on Windows):
+            export HTTP_PROXY=http://<WINDOWS_IP>:7890 HTTPS_PROXY=http://<WINDOWS_IP>:7890
+            sudo -E docker pull ghcr.io/berriai/litellm:main-latest
+            Then re-run: bash setup.sh (it will reuse local image)
+         6. Use a custom image:  LITELLM_IMAGE=<registry>/berriai/litellm:main-latest bash setup.sh
+         7. If you have the image tarball, load it:  docker load -i litellm.tar"
 }
+
 
 start_litellm_container() {
   log_info "Starting the LiteLLM container on port ${LITELLM_PORT}..."
@@ -3250,7 +3327,7 @@ show_menu() {
   echo -e "${C_BLUE}${C_BOLD}================================================================="
   echo -e "=================================================================${C_NC}"
   echo -e "            ${C_GREEN}${C_BOLD}Free AI Agents${C_NC}${C_GREEN}  |  Local AI Gateway Manager${C_NC}"
-  echo -e "            ${C_YELLOW}Version [ ${FREE_AGENTS_VERSION} ]${C_NC}   LiteLLM + OmniRoute"
+  echo -e "            ${C_YELLOW}Script Version [ ${FREE_AGENTS_VERSION} ]${C_NC}   LiteLLM + OmniRoute"
   echo -e "${C_BLUE}${C_BOLD}================================================================="
   echo -e "=================================================================${C_NC}"
   echo
