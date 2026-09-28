@@ -48,7 +48,7 @@ set -euo pipefail
 #-------------------------------------------------------------------------------
 # Constants
 #-------------------------------------------------------------------------------
-FREE_AGENTS_VERSION="0.0.7"
+FREE_AGENTS_VERSION="0.0.8"
 REPO="im-JvD/FreeAI-Agents"
 
 # THE single model id handed to Claude. It must start with "claude" so that
@@ -3181,13 +3181,46 @@ cmd_update() {
     rm -f "$tmp"
     return 1
   fi
+  # SCRIPT_PATH may be /dev/fd/63 when run via bash <(curl ...) - not a real file, cannot mv to it
+  local is_fd=0
+  case "$SCRIPT_PATH" in
+    /dev/fd/*|/proc/self/fd/*) is_fd=1 ;;
+  esac
+  if [ "$is_fd" -eq 1 ] || [ ! -f "$SCRIPT_PATH" ]; then
+    log_info "Running via curl pipe ($SCRIPT_PATH) - skipping update of ephemeral script file"
+    # Still check if MANAGER_COPY exists and is same as tmp
+    if [ -f "$MANAGER_COPY" ] && cmp -s "$tmp" "$MANAGER_COPY" 2>/dev/null; then
+      log_ok "Manager copy is already up to date."
+    else
+      cp -f "$tmp" "$MANAGER_COPY" 2>/dev/null || true
+      chmod 755 "$MANAGER_COPY" 2>/dev/null || true
+      log_ok "Manager copy updated: ${MANAGER_COPY} -> v$(grep -m1 'FREE_AGENTS_VERSION=' "$tmp" | cut -d'"' -f2)"
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+    # Update freeagents CLI from manager copy
+    SCRIPT_PATH="$MANAGER_COPY"
+    write_management_cli || true
+    log_info "Re-executing with new manager copy to apply updates (v$(grep -m1 'FREE_AGENTS_VERSION=' "$MANAGER_COPY" | cut -d'"' -f2))..."
+    FREEAGENTS_UPDATE_EXEC=1 exec bash "$MANAGER_COPY" update
+  fi
+
   if cmp -s "$tmp" "$SCRIPT_PATH" 2>/dev/null; then
     log_ok "Script is already up to date."
     rm -f "$tmp"
   else
-    mv "$tmp" "$SCRIPT_PATH"
-    chmod +x "$SCRIPT_PATH" 2>/dev/null || true
-    log_ok "Script updated: ${SCRIPT_PATH} -> v$(grep -m1 'FREE_AGENTS_VERSION=' "$SCRIPT_PATH" | cut -d'"' -f2)"
+    # Use cp instead of mv to handle cross-device and /dev/fd cases safely
+    if cp -f "$tmp" "$SCRIPT_PATH" 2>/dev/null; then
+      chmod +x "$SCRIPT_PATH" 2>/dev/null || true
+      log_ok "Script updated: ${SCRIPT_PATH} -> v$(grep -m1 'FREE_AGENTS_VERSION=' "$SCRIPT_PATH" | cut -d'"' -f2)"
+      rm -f "$tmp" 2>/dev/null || true
+    else
+      # Fallback: if cp fails (e.g. /dev/fd), just keep tmp as new script and use manager copy
+      log_warn "Could not overwrite $SCRIPT_PATH (ephemeral or permission), using manager copy instead"
+      cp -f "$tmp" "$MANAGER_COPY" 2>/dev/null || true
+      chmod 755 "$MANAGER_COPY" 2>/dev/null || true
+      rm -f "$tmp" 2>/dev/null || true
+      SCRIPT_PATH="$MANAGER_COPY"
+    fi
   fi
   cp -f "$SCRIPT_PATH" "$MANAGER_COPY" 2>/dev/null || true
   chmod 755 "$MANAGER_COPY" 2>/dev/null || true
