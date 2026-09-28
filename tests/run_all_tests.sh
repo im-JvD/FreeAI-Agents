@@ -397,9 +397,8 @@ if [ "$MNT_OK" -eq 1 ]; then
   assert_contains "${HOME_DIR}/.litellm/config.yaml" "model: nvidia_nim/meta/llama-3.3-70b-instruct"
   assert_contains "${HOME_DIR}/.litellm/config.yaml" "model: together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo"
   assert_contains "${HOME_DIR}/.litellm/config.yaml" "router_settings:"
-  assert_contains "${HOME_DIR}/.litellm/config.yaml" "model_group_alias:"
-  assert_contains "${HOME_DIR}/.litellm/config.yaml" "claude-sonnet-4-5:"
-  assert_contains "${HOME_DIR}/.litellm/config.yaml" "hidden: true"
+  assert_not_contains "${HOME_DIR}/.litellm/config.yaml" "model_group_alias:"
+  assert_not_contains "${HOME_DIR}/.litellm/config.yaml" "claude-sonnet-4-5:"
   assert_contains "${HOME_DIR}/.litellm/config.yaml" "enable_pre_call_checks: true"
   MK="$(master_key_from)"
   if [ -n "$MK" ] && [ "$MK" = "$(litellm_docker_run)" ]; then a_ok "master key consistent"; else a_bad "master key mismatch"; fi
@@ -422,6 +421,8 @@ if [ "$MNT_OK" -eq 1 ]; then
   assert_file_exists "$dprof"
   assert_json "$dprof" "d['inferenceGatewayBaseUrl'] == 'http://127.0.0.1:4000' and d['modelDiscoveryEnabled'] is True" "desktop profile (LiteLLM) wired"
   assert_json "$dprof" "d['inferenceModels'][0]['labelOverride'] == 'FreeAgents/LiteLLM'" "desktop label FreeAgents/LiteLLM"
+  assert_json "$dprof" "d['inferenceModels'][0]['name'] == 'claude-freeagents'" "desktop model is claude-freeagents (not ambiguous catalog id)"
+  assert_json "$dprof" "len(d['inferenceModels']) == 1" "only one model advertised (avoids ambiguous error)"
   assert_json "/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/_meta.json" "any(e.get('id') == '00000000-0000-4000-8000-0000000a119e' for e in d['entries'])" "_meta entry added"
   assert_not_contains "$CURRENT_LOG" "OmniRoute-OpenCode"
   dump_state
@@ -498,6 +499,7 @@ PY
   dprof="/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a110e.json"
   assert_file_exists "$dprof"
   assert_json "$dprof" "d['inferenceModels'][0]['labelOverride'] == 'FreeAgents/Omni'" "desktop label FreeAgents/Omni"
+  assert_json "$dprof" "d['inferenceModels'][0]['name'] == 'claude-freeagents'" "desktop model is claude-freeagents"
   assert_json "$dprof" "d['inferenceGatewayBaseUrl'] == 'http://127.0.0.1:${MOCK_PORT}'" "desktop profile points at OmniRoute"
   assert_file_missing "/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a119e.json"
   dump_state

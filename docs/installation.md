@@ -69,7 +69,7 @@ bash setup.sh
 ```
 =================================================================
             Free AI Agents  |  Local AI Gateway Manager
-            Script Version [ 0.0.5 ]   LiteLLM + OmniRoute
+            Script Version [ 0.0.6 ]   LiteLLM + OmniRoute
 =================================================================
 
    1 - Install  ( LiteLLM / OmniRoute / Both )

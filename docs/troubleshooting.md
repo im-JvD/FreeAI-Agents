@@ -224,9 +224,10 @@ freeagents credentials      # همهٔ توکن‌ها/URLها یکجا
 ### اپ Claude Desktop مدل گیت‌وی را نشان نمی‌دهد
 
 1. نصاب برای هر گیت‌وی یک پروفایل در `%LOCALAPPDATA%\Claude-3p\configLibrary\<uuid>.json` می‌سازد (LiteLLM: `…a119e` — OmniRoute: `…a110e`) و `_meta.json` را به‌روز می‌کند. مطمئن شوید اپ را بعد از نصاب **کاملاً** بسته و باز کرده‌اید (فهرست مدل‌ها هنگام باز شدن گرفته می‌شود).
-2. پیکر مدل اپ فقط idهای حاوی `claude`/`anthropic` را نشان می‌دهد؛ مدل نصاب (`claude-freeagents`) همین شرط را دارد و برای سازگاری، alias مخفی `claude-sonnet-4-5` هم به همان مدل وصل است.
+2. پیکر مدل اپ فقط idهای حاوی `claude`/`anthropic` را نشان می‌دهد؛ مدل نصاب (`claude-freeagents`) همین شرط را دارد و به‌صورت یکتا از خطای `Ambiguous model` جلوگیری می‌کند (در LiteLLM 1.x مدل‌هایی مثل `claude-sonnet-4-5` در چند provider وجود دارند و مبهم هستند).
 3. اگر پروفایل را دستی ست می‌کنید: **Help > Troubleshooting > Enable Developer Mode** → **Developer > Configure Third-Party Inference…** — راهنمای کامل در [usage.md](usage.md) بخش ۵. مقدار `Gateway base URL` باید **بدون `/v1`** باشد: `http://127.0.0.1:4000` یا `http://127.0.0.1:20128`.
 4. اگر «Invalid: Model list» می‌بینید و Apply غیرفعال است، پروفایل را از نو بسازید: منو → `9` → `5` (Switch the ACTIVE gateway) و بعد از آن اپ‌ها را ری‌استارت کنید.
+5. اگر خطای `Ambiguous model 'claude-sonnet-4-5'` می‌بینید، نسخهٔ قدیمی (قبل از 0.0.6) نصب کرده‌اید — به‌روزرسانی کنید: `freeagents update` یا `bash <(curl -fsSL https://raw.githubusercontent.com/im-JvD/FreeAI-Agents/main/setup.sh)` — نسخه جدید فقط `claude-freeagents` را تبلیغ می‌کند.
 
 ### چطور گیت‌وی فعال را عوض کنم (کلاد کد + دسکتاپ)؟
 
@@ -236,6 +237,33 @@ freeagents      # باز کردن منو
 ```
 
 `settings.json`، پروفایل دسکتاپ (`appliedId` در `_meta.json`) و همهٔ توکن‌ها هم‌زمان به‌روز می‌شوند. بعد از تعویض، اپ‌های Claude را کامل ببندید و باز کنید.
+
+### خطای `Add credits or update billing to continue.`
+
+این خطا از **OpenRouter** (یا گاهی Groq) می‌آید وقتی حساب شما اعتبار ندارد. LiteLLM سعی می‌کند با `simple-shuffle` و `num_retries` به provider بعدی برود، ولی اگر همه providerها به خاطر تحریم یا بی‌اعتباری fail شوند، آخرین خطا (همین `Add credits`) نمایش داده می‌شود.
+
+راه‌حل:
+
+```bash
+freeagents doctor          # ببین کدام providerها fail می‌شوند
+# اگر OpenRouter اعتبار ندارد، کلیدش را حذف کن و دوباره نصب کن:
+freeagents
+# منو -> 9 -> 2 (Re-enter provider keys) -> OpenRouter را خالی بگذار
+
+# یا مستقیم:
+# ~/.free-ai-agents/provider_keys.env را ویرایش کن و OPENROUTER_API_KEY را پاک کن
+# سپس:
+freeagents restart
+```
+
+همچنین مطمئن شوید **پراکسی ویندوز** برای هر دو گیت‌وی فعال است (Clash/v2rayN با Allow LAN):
+
+```bash
+freeagents
+# منو -> 9 -> 1 (Windows proxy ON) -> آدرس پراکسی را وارد کن
+freeagents restart
+freeagents doctor
+```
 
 ### مدل جواب نمی‌دهد (`429` / `quota exceeded`)
 

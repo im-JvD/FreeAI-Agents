@@ -48,7 +48,7 @@ set -euo pipefail
 #-------------------------------------------------------------------------------
 # Constants
 #-------------------------------------------------------------------------------
-FREE_AGENTS_VERSION="0.0.5"
+FREE_AGENTS_VERSION="0.0.6"
 REPO="im-JvD/FreeAI-Agents"
 
 # THE single model id handed to Claude. It must start with "claude" so that
@@ -930,13 +930,6 @@ generate_litellm_config() {
     echo "  cooldown_time: 30"
     echo "  timeout: 600"
     echo "  enable_pre_call_checks: true"
-    echo "  # Claude Desktop validates model names against the Anthropic catalog in"
-    echo "  # some builds. This alias routes that catalog id to the SAME single group"
-    echo "  # while 'hidden' keeps /v1/models clean (only ${MODEL_ID} is advertised)."
-    echo "  model_group_alias:"
-    echo "    ${CATALOG_MODEL_ID}:"
-    echo "      model: ${MODEL_ID}"
-    echo "      hidden: true"
     echo ""
     echo "litellm_settings:"
     echo "  drop_params: true          # silently drop unsupported provider params"
@@ -976,7 +969,12 @@ build_docker_env_args() {
   if [ -n "$WIN_PROXY_URL" ]; then
     DOCKER_ENV_ARGS+=(-e "HTTP_PROXY=${WIN_PROXY_URL}" \
                       -e "HTTPS_PROXY=${WIN_PROXY_URL}" \
-                      -e "NO_PROXY=localhost,127.0.0.1,${DB_CONTAINER}")
+                      -e "http_proxy=${WIN_PROXY_URL}" \
+                      -e "https_proxy=${WIN_PROXY_URL}" \
+                      -e "ALL_PROXY=${WIN_PROXY_URL}" \
+                      -e "all_proxy=${WIN_PROXY_URL}" \
+                      -e "NO_PROXY=localhost,127.0.0.1,${DB_CONTAINER}" \
+                      -e "no_proxy=localhost,127.0.0.1,${DB_CONTAINER}")
   fi
   return 0
 }
@@ -1388,8 +1386,12 @@ write_omni_env() {
     if [ -n "$WIN_PROXY_URL" ]; then
       echo "HTTP_PROXY=${WIN_PROXY_URL}"
       echo "HTTPS_PROXY=${WIN_PROXY_URL}"
+      echo "http_proxy=${WIN_PROXY_URL}"
+      echo "https_proxy=${WIN_PROXY_URL}"
       echo "ALL_PROXY=${WIN_PROXY_URL}"
+      echo "all_proxy=${WIN_PROXY_URL}"
       echo "NO_PROXY=localhost,127.0.0.1,::1"
+      echo "no_proxy=localhost,127.0.0.1,::1"
     fi
     # Gemini accepts an env key as a headless escape hatch; a dashboard
     # connection always wins when both exist.
@@ -2144,19 +2146,17 @@ write_desktop_profile() { # $1 gateway
   deskcfg="${root}/claude_desktop_config.json"
   mkdir -p "$lib" 2>/dev/null || { log_warn "       Cannot create ${lib}"; return 0; }
 
-  FA_DESK_PROFILE="$profile" FA_BASE="$base" FA_TOKEN="$token" FA_LABEL="$label" FA_MODEL="$MODEL_ID" \
-  FA_CATALOG="$CATALOG_MODEL_ID" python3 - <<'PYEOF'
+  FA_DESK_PROFILE="$profile" FA_BASE="$base" FA_TOKEN="$token" FA_LABEL="$label" FA_MODEL="$MODEL_ID" python3 - <<'PYEOF'
 import json, os
 profile = os.environ["FA_DESK_PROFILE"]
 base = os.environ["FA_BASE"]
 token = os.environ["FA_TOKEN"]
 label = os.environ["FA_LABEL"]
 model = os.environ["FA_MODEL"]
-catalog = os.environ["FA_CATALOG"]
 
-models = [{"name": catalog, "labelOverride": label, "isFamilyDefault": True}]
-if model != catalog:
-    models.append({"name": model, "labelOverride": label + " (auto)"})
+# Only advertise the single custom model (claude-freeagents) to avoid
+# LiteLLM 1.x ambiguous model errors (e.g. claude-sonnet-4-5 exists in many providers)
+models = [{"name": model, "labelOverride": label, "isFamilyDefault": True}]
 
 data = {
     "inferenceProvider": "gateway",

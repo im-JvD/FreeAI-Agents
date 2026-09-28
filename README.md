@@ -92,8 +92,7 @@ freeagents status     (وضعیت هر دو گیت‌وی: health، پورت و 
 | `claude-freeagents` | `FreeAgents/LiteLLM` | یک model group روی ۹ ارائه‌دهنده با retry/cooldown (LiteLLM) |
 | `claude-freeagents` | `FreeAgents/Omni` | یک combo با استراتژی `auto` روی همان ارائه‌دهنده‌ها (OmniRoute) |
 
-- هر دو گیت‌وی **همان یک نام مدل** را ارائه می‌دهند: `claude-freeagents` — کافی است همین را در Claude Code (`/model`) یا پروفایل Claude Desktop انتخاب کنید.
-- برای سازگاری با کاتالوگ مدل اپ دسکتاپ، یک **alias مخفی** (`claude-sonnet-4-5`) هم تعریف می‌شود که به همان مدل واحد می‌رسد و در `/v1/models` نمایش داده نمی‌شود.
+- هر دو گیت‌وی **همان یک نام مدل** را ارائه می‌دهند: `claude-freeagents` — کافی است همین را در Claude Code (`/model`) یا پروفایل Claude Desktop انتخاب کنید. این نام یکتا از خطای `Ambiguous model` در LiteLLM 1.x جلوگیری می‌کند.
 - فقط ارائه‌دهنده‌هایی که کلیدشان را وارد کرده‌اید در مدل نهایی حاضرند.
 
 ---
