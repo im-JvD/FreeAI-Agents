@@ -44,18 +44,19 @@ bash <(wget -qO- https://raw.githubusercontent.com/im-JvD/FreeAI-Agents/main/set
 | 📦 بدون build | ایمیج آمادهٔ `ghcr.io/berriai/litellm:main-latest` (با retry خودکار، fallback به ایمیج لوکال و میرور اختیاری ghcr) |
 | 🟢 OmniRoute از npm رسمی | `npm install -g omniroute` (+ Node ≥ 20 از NodeSource و fallback به `registry.npmmirror.com`) — بدون داکر، بدون ریپوی واسط |
 | 🔑 ۹ کلید API + تست زنده | Groq، OpenRouter، Google AI Studio، Cerebras، Mistral + GitHub Models، SambaNova، NVIDIA NIM، Together AI — هر کلید قبل از نصب واقعاً تست می‌شود (کشف کلیدهای جابجا) |
-| 🔁 روتینگ هوشمند LiteLLM | یک model group روی همهٔ کلیدها با retry/cooldown؛ اگر یک ارائه‌دهنده خطا بدهد، بعدی خودکار امتحان می‌شود |
-| 🎯 Combo خودکار OmniRoute | یک combo با استراتژی `auto` که همان ارائه‌دهنده‌ها را پشت مدل واحد جمع می‌کند |
+| 🔁 روتینگ هوشمند LiteLLM | یک model group روی همهٔ کلیدها با `simple-shuffle` + `num_retries=3` + `cooldown_time=30`؛ اگر یک ارائه‌دهنده خطا بدهد، بعدی خودکار امتحان می‌شود (لودبالانسر) |
+| 🎯 Combo خودکار OmniRoute | یک combo با استراتژی `auto` که همان ارائه‌دهنده‌ها را پشت مدل واحد جمع می‌کند (لودبالانسر داخلی) |
 | 🖥️ پنل‌های مدیریت | LiteLLM UI روی `http://127.0.0.1:4000/ui` و داشبورد OmniRoute روی `http://127.0.0.1:20128` |
 | ⚙️ استارت خودکار در بوت WSL | سرویس systemd (یا boot command در `/etc/wsl.conf`) برای هر دو گیت‌وی |
 | ⌨️ CLI مدیریت | یک دستور برای همه‌چیز: `freeagents up / down / restart / status / logs / doctor / credentials / update / uninstall` |
 | 🪟 تشخیص هوشمند ویندوز | پیدا کردن مسیر پروفایل با PowerShell (حتی با فاصله در نام کاربری) |
 | 🖥️ اپ Claude Desktop خودکار | ساخت پروفایل گیت‌وی در `%LOCALAPPDATA%\Claude-3p\configLibrary` + به‌روزرسانی `_meta.json` |
 | 🔒 کلید امن | Master Key و secretهای OmniRoute خودکار ساخته و با دسترسی `600` ذخیره می‌شوند |
-| 🧪 تست‌شده | ۲۳ سناریوی آفلاین (با mock کامل OmniRoute) + تست واقعی E2E با خودِ LiteLLM |
+| 🧪 تست‌شده | ۲۳ سناریوی آفلاین (با mock کامل OmniRoute) + تست واقعی E2E با خودِ LiteLLM + تست زنده upstream با کلید واقعی |
+| 🧪 تست زنده | `~/.free-ai-agents/live_test.sh` — سلامت و چت واقعی هر دو گیت‌وی با کلیدهای ذخیره‌شده |
 | 🎛️ Config Manager | خاموش/روشن‌کردن پروکسی ویندوز، ورود دوبارهٔ توکن‌ها، اعمال دوبارهٔ کانفیگ Claude، تغییر گیت‌وی فعال دسکتاپ |
 | 🔄 Update | دانلود خودکار آخرین نسخهٔ اسکریپت از همین ریپو + نصب مجدد کامل (کلیدها و پروکسی حفظ می‌شوند) |
-| 🧹 Uninstall تمیز | حذف کانتینر، سرویس‌ها، پکیج npm، پروفایل‌های Claude و همهٔ فایل‌های ساخته‌شده — با یک تأیید |
+| 🧹 Uninstall تمیز | حذف کانتینر، سرویس‌ها، پکیج npm، پروفایل‌های Claude و همهٔ فایل‌های ساخته‌شده — با یک تأیید (شامل `live_test.sh`) |
 
 ---
 
@@ -111,6 +112,7 @@ freeagents status     (وضعیت هر دو گیت‌وی: health، پورت و 
 ```
 FreeAI-Agents/
 ├── setup.sh             ← اسکریپت اصلی (قابل اجرای مستقیم از GitHub)
+├── freeagents/              ← ابزارهای runtime (سورس `live_test.sh` که به `~/.free-ai-agents/` کپی می‌شود)
 ├── .gitignore               ← لاگ‌های تست و بدل‌های تولیدشده نادیده گرفته می‌شوند
 ├── docs/                    ← مستندات کامل فارسی
 │   ├── README.md            ← فهرست مستندات
@@ -120,7 +122,7 @@ FreeAI-Agents/
 │   ├── uninstall.md         ← راهنمای حذف کامل
 │   └── troubleshooting.md   ← عیب‌یابی خطاهای رایج
 └── tests/                   ← تست‌های خودکار + نتایج اجرا
-    ├── README.md            ← مستندات تست‌ها
+    ├── README.md            ← مستندات تست‌ها (شامل ۴ لایه: آفلاین، E2E، زنده)
     ├── run_all_tests.sh     ← سوئیت ۲۳ سناریویی آفلاین (بدون شبکه)
     ├── e2e_litellm_real.sh  ← تست واقعی E2E با خودِ LiteLLM (PyPI/venv)
     ├── e2e_real_docker.sh   ← تست واقعی E2E با Docker (روی WSL2 واقعی)

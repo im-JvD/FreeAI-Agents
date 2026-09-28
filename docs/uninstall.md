@@ -59,7 +59,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/im-JvD/FreeAI-Agents/main/se
 | سرویس systemd OmniRoute | ✅ حذف | `/etc/systemd/system/omniroute.service` |
 | پکیج npm ام OmniRoute | ✅ حذف | `npm uninstall -g omniroute` (با `FREEAGENTS_KEEP_NPM=1` حفظ می‌شود) |
 | دادهٔ OmniRoute | ✅ حذف | `~/.omniroute/` (`.env`، `storage.sqlite`) |
-| لانچر و state نصاب | ✅ حذف | `~/.free-ai-agents/` (کلیدها، پراکسی، لاگ‌ها، کپی اسکریپت) |
+| لانچر و state نصاب | ✅ حذف | `~/.free-ai-agents/` (کلیدها، پراکسی، لاگ‌ها، کپی اسکریپت، `live_test.sh`) |
 | کانفیگ Claude Code ویندوز | ✅ حذف/بازگردانی | `%USERPROFILE%\.claude\settings.json` — جدیدترین بکاپ `settings.json.bak.*` برمی‌گردد |
 | پروفایل‌های اپ Claude Desktop | ✅ حذف/بازگردانی | `%LOCALAPPDATA%\Claude-3p\configLibrary` (پروفایل‌های FreeAgents + اصلاح `_meta.json`) |
 | سرویس/خط بوت | ✅ حذف | `litellm.service`/`omniroute.service` یا خط boot در `/etc/wsl.conf` |

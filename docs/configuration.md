@@ -17,6 +17,7 @@
 | `~/.omniroute/.env` | WSL | secretهای OmniRoute، پورت، مسیر داده و پراکسی (`600`) |
 | `~/.omniroute/storage.sqlite` | WSL | دیتابیس OmniRoute (اتصال‌ها، کلیدها، comboها، تنظیمات) |
 | `~/.free-ai-agents/` | WSL | state نصاب: `setup.sh` (کپی مدیر)، `provider_keys.env` (`600`)، `windows_proxy.txt` (`600`)، `omniroute_claude.key`، `omniroute_master.key`، `omniroute.pid`، `active_gateway`، `logs/` |
+| `~/.free-ai-agents/live_test.sh` | WSL | تست زنده upstream با کلید واقعی — سلامت و چت واقعی هر دو گیت‌وی (حذف با uninstall) |
 | `~/.free-ai-agents/omniroute-run.sh` | WSL | لانچر OmniRoute (env را لود و `omniroute serve` را اجرا می‌کند، `700`) |
 | `/usr/local/bin/freeagents` | WSL | تنها CLI مدیریت (up/down/status/doctor/…) |
 | `/usr/local/bin/freeagents-boot.sh` | WSL | استارت خودکار در بوت WSL (حالت `wslconf`) |

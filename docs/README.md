@@ -50,7 +50,10 @@
 │                                                                │
 │  هر دو: یک مدل → claude-freeagents                             │
 │         (برچسب‌ها: FreeAgents/LiteLLM و FreeAgents/Omni)        │
+│         لودبالانسر: LiteLLM=simple-shuffle+retry/cooldown       │
+│                     OmniRoute=combo strategy auto               │
 │  /etc/docker/daemon.json ← میرورهای ایرانی (رفع 403)            │
+│  ~/.free-ai-agents/live_test.sh ← تست زنده upstream             │
 └────────────────────────────────────────────────────────────────┘
       │  پراکسی ویندوز (اختیاری: Clash / v2rayN / Hiddify)
       ▼

@@ -2,7 +2,7 @@
 
 # 🧪 مستندات تست‌ها
 
-کیفیت اسکریپت `setup.sh` با **سه لایهٔ تست** تضمین شده است. همهٔ تست‌ها قابل اجرای مجدد هستند؛ لاگ‌های پرحجم در `.gitignore` هستند و فقط `results/summary.txt` در گیت ثبت می‌شود.
+کیفیت اسکریپت `setup.sh` با **چهار لایهٔ تست** تضمین شده است. لاگ‌های پرحجم در `.gitignore` هستند و فقط `results/summary.txt` در گیت ثبت می‌شود.
 
 ---
 
@@ -12,7 +12,8 @@
 |---|---|
 | سوئیت آفلاین (۲۳ سناریو، T00–T22) | ✅ ۲۳ پاس / ۰ شکست / ۰ اسکیپ |
 | E2E واقعی با خودِ LiteLLM v1.103.0 از PyPI (کلیدهای جعلی، تست روتینگ) | ✅ پاس |
-| E2E واقعی با Docker + npm (روی WSL2 واقعی) | ⏭️ فقط روی WSL2 واقعی اجرا می‌شود — در سندباکس SKIP می‌شود |
+| E2E واقعی با Docker + npm (روی WSL2 واقعی) | ⏭️ فقط روی WSL2 واقعی — در سندباکس SKIP |
+| **تست زندهٔ upstream (کلید واقعی، هر دو گیت‌وی)** | ⏭️ فقط با کلید واقعی روی WSL2 — در سندباکس SKIP |
 
 جزئیات: [`results/summary.txt`](results/summary.txt) (لاگ‌های تکی `T*.log` و `E2E_*.log` موقع اجرا در `results/` ساخته می‌شوند ولی ignore هستند).
 
@@ -26,52 +27,48 @@
 
 | بدل | کار |
 |---|---|
-| `docker` (+ `docker.installer`) | شبیه‌س وضعیت‌مند: ثبت فراخوانی‌ها، دفتر کانتینرها (`containers.txt`)، `docker inspect`، `pull` با شکست قابل تنظیم |
+| `docker` (+ `docker.installer`) | شبیه‌س وضعیت‌مند: ثبت فراخوانی‌ها، دفتر کانتینرها، `docker inspect`، `pull` با شکست قابل تنظیم |
 | `npm` / `node` | نصب `omniroute` با کپی `omniroute.installer`، ثبت `npm-calls.log`، fallback رجیستری |
-| `omniroute` (+ `omniroute.installer`) | سرور واقعی: `mock_omniroute.py` که REST رسمی OmniRoute را پیاده می‌کند (login با کوکی `auth_token`، `providers`، `keys`، `combos`، `settings/proxy`، کاتالوگ زنده) |
+| `omniroute` (+ `omniroute.installer`) | سرور واقعی: `mock_omniroute.py` که REST رسمی OmniRoute را پیاده می‌کند (login با کوکی `auth_token`، `providers`، `keys`، `combos`) |
 | `apt-get` | موقع «نصب docker.io» بدل داکر را نصب می‌کند |
-| `sudo` | بدون ارتقای دسترسی؛ `/etc/docker` و `/usr/local/bin` و `/etc/systemd` را به ریشهٔ مجازی (`FAKE_ROOT`) منتقل می‌کند |
-| `powershell.exe` | پروفایل ویندوزی با **فاصله در نام کاربری** (`Test User`) برمی‌گرداند |
-| `curl` | کد سلامت قابل تنظیم (۲۰۰ یا قطع)، ثبت فراخوانی‌ها |
+| `sudo` | بدون ارتقای دسترسی؛ `/etc/docker` و `/usr/local/bin` و `/etc/systemd` را به ریشهٔ مجازی منتقل می‌کند |
+| `powershell.exe` | پروفایل ویندوزی با فاصله در نام کاربری (`Test User`) |
+| `curl` | کد سلامت قابل تنظیم (۲۰۰ یا قطع) |
 | `service` / `systemctl` | فقط ثبت فراخوانی |
 
-هر سناریو اسکریپت واقعی را سرتاسر اجرا می‌کند و روی خروجی‌ها assert می‌نویسد: کد خروج، محتوای `config.yaml` (یک model group `claude-freeagents` + `router_settings` شامل `model_group_alias` مخفی)، `~/.omniroute/.env` (سه secret ≥ حداقل + `REQUIRE_API_KEY=true`)، `settings.json` کلاد کد (base URL بدون `/v1` + توکن = Master Key یا کلید OmniRoute)، پروفایل‌های Claude Desktop (`…a119e` و `…a110e` + `_meta.json`/`appliedId`)، آرگومان‌های `docker run` و `npm install -g omniroute`، میرورهای `daemon.json`، state در `~/.free-ai-agents/` و رفتار `uninstall`.
+هر سناریو اسکریپت واقعی را سرتاسر اجرا می‌کند و روی خروجی‌ها assert می‌نویسد: `config.yaml` (یک model group `claude-freeagents` + `router_settings` شامل `model_group_alias` مخفی)، `~/.omniroute/.env`، `settings.json` کلاد کد، پروفایل‌های Claude Desktop، `~/.free-ai-agents/live_test.sh`، `docker run` و `npm install -g omniroute`.
 
 ### فهرست ۲۳ سناریو
 
 | تست | سناریو |
 |---|---|
-| T00 | ایستا: `bash -n`، shebang، `shellcheck -S warning` پاک، پرم ۷۵۵، عدم وجود `OmniRoute-OpenCode`/`LiteLLM.sh`/`OmniRoute.sh`، لینک آپدیت فقط از همین ریپو |
-| T01 | LiteLLM با هر ۹ کلید (۵ اصلی + ۴ اختیاری) — ۱۱+ deployment در یک گروه `claude-freeagents`، alias مخفی، `trusted_proxy_ranges: []` |
-| T02 | LiteLLM فقط با Groq — فقط deploymentهای Groq |
+| T00 | ایستا: `bash -n`، shebang، `shellcheck -S warning` پاک، پرم ۷۵۵، عدم وجود `OmniRoute-OpenCode`/`LiteLLM.sh`/`OmniRoute.sh` |
+| T01 | LiteLLM با هر ۹ کلید — ۱۱+ deployment در یک گروه `claude-freeagents`، alias مخفی، `trusted_proxy_ranges: []` + نصب `live_test.sh` |
+| T02 | LiteLLM فقط با Groq |
 | T03 | OmniRoute فقط (npm رسمی) — اتصال `freeagents-install`، کلید `freeagents-claude`، combo `claude-freeagents`/auto |
-| T04 | هر دو گیت‌وی در یک اجرا — کلیدها و پراکسی یک‌بار پرسیده می‌شوند، state هر دو ساخته می‌شود |
+| T04 | هر دو گیت‌وی در یک اجرا — کلیدها و پراکسی یک‌بار |
 | T05 | دستورات غیرتعاملی: `freeagents up/down/restart/status/doctor/credentials/logs` |
-| T06 | سطح دستورات: هر دو گیت‌وی، نبود دستورهای تکی `omni up/down` و `litellm up/down`، وجود `freeagents help` |
-| T07 | منو: ورودی نامعتبر هندل می‌شود، `0` تمیز خارج می‌شود، `freeagents` بدون آرگومان منو را باز می‌کند |
-| T08 | تعویض پروفایل: گیت‌وی فعال (`active_gateway`) تصمیم می‌گیرد Claude به کدام پورت وصل شود |
-| T09 | پراکسی ویندوز: ON (هر دو موتور)، ماندگاری در نصب دوباره، سپس OFF — تزریق `HTTP_PROXY` به کانتینر و `.env` |
-| T10 | ورود دوبارهٔ کلیدها پراکسی را نگه می‌دارد و برای هر دو موتور اعمال می‌کند |
-| T11 | Update: دانلود مجدد از همین ریپو (`im-JvD/FreeAI-Agents`)، کلیدها و پراکسی حفظ می‌شوند |
-| T12 | Self-heal: کپی خراب مدیر (`~/.free-ai-agents/setup.sh`) توسط CLI دوباره دانلود می‌شود |
-| T13 | Uninstall همه‌چیز را پاک می‌کند: کانتینرها، سرویس‌ها، پکیج npm، داده‌ها، پروفایل‌های Claude، `freeagents` |
-| T14 | نصب/حذف اسکریپتی: `freeagents install --keys-file` + `freeagents uninstall --yes` |
-| T15 | بدون ویندوز (`FREEAGENTS_SKIP_WINDOWS=1`): نصب موفق + هشدار، بدون فایل ویندوزی |
-| T16 | تأیید کلید: کلید ردشده (۴۰۱) گزارش و امکان ورود مجدد دارد |
-| T17 | نصب مجدد idempotent است: secretها، کلیدها و combo ثابت می‌مانند |
-| T18 | شکست login داشبورد OmniRoute (`--reject-login`): نصب ادامه می‌یابد و توضیح دستی داده می‌شود |
-| T19 | سلامت رجیستری ارائه‌دهنده‌ها (خواندن مستقیم از اسکریپت): ۹ ارائه‌دهنده، `MODEL_ID=claude-freeagents` |
-| T20 | مقاومت داکر: بکاپ `daemon.json`، retry pull و fallback به میرور `LITELLM_GHCR_MIRROR` |
-| T21 | OmniRoute با secret کوتاه موجود: بازتولید می‌شود، fatal نیست |
-| T22 | هاست بدون داکر: نصب فقط-OmniRoute نباید به داکر دست بزند |
-
-### اجرا
+| T06 | سطح دستورات: هر دو گیت‌وی، نبود `omni up/down` و `litellm up/down` |
+| T07 | منو: ورودی نامعتبر، `0` خروج تمیز |
+| T08 | تعویض پروفایل: `active_gateway` |
+| T09 | پراکسی ویندوز: ON (هر دو)، ماندگاری، سپس OFF |
+| T10 | ورود دوبارهٔ کلیدها پراکسی را نگه می‌دارد |
+| T11 | Update: دانلود از همین ریپو، کلیدها و پراکسی حفظ |
+| T12 | Self-heal: کپی خراب مدیر دوباره دانلود می‌شود |
+| T13 | Uninstall همه‌چیز را پاک می‌کند: کانتینرها، سرویس‌ها، پکیج npm، `~/.free-ai-agents/` (شامل `live_test.sh`)، پروفایل‌های Claude |
+| T14 | نصب/حذف اسکریپتی: `install --keys-file` + `uninstall --yes` |
+| T15 | بدون ویندوز (`FREEAGENTS_SKIP_WINDOWS=1`) |
+| T16 | تأیید کلید: کلید ردشده (۴۰۱) گزارش و امکان ورود مجدد |
+| T17 | نصب مجدد idempotent |
+| T18 | شکست login داشبورد OmniRoute |
+| T19 | سلامت رجیستری ارائه‌دهنده‌ها |
+| T20 | مقاومت داکر: بکاپ `daemon.json`، retry pull |
+| T21 | secret کوتاه OmniRoute بازتولید می‌شود |
+| T22 | هاست بدون داکر: فقط-OmniRoute نباید به داکر دست بزند |
 
 ```bash
 bash tests/run_all_tests.sh
 ```
-
-خروجی: `tests/results/summary.txt` + لاگ‌های موقت `tests/results/T*.log` (ignore هستند؛ فقط summary کامیت می‌شود). نیازها: `bash`، `python3`، `sudo -n` (برای ساخت دو پوشهٔ فیک زیر `/mnt/c/Users/Test User` و `Ali Rezaei` که موقع خروج پاک می‌شوند).
 
 ---
 
@@ -79,24 +76,16 @@ bash tests/run_all_tests.sh
 
 **فایل:** [`e2e_litellm_real.sh`](e2e_litellm_real.sh)
 
-LiteLLM واقعی از PyPI در یک venv نصب و با دقیقاً همان `config.yaml` و Master Key که اسکریپت تولید کرده بوت می‌شود (`litellm --config ... --port ...`). سپس روی API زنده assert می‌شود:
+LiteLLM واقعی از PyPI بوت می‌شود و روی API زنده assert می‌شود:
 
-- `/health/liveliness` → `200`
-- `GET /v1/models` با Master Key → دقیقاً `["claude-freeagents"]` (alias مخفی `claude-sonnet-4-5` نمایش داده نمی‌شود)
-- `GET /v1/models` بدون کلید → رد می‌شود (۵۰۰/۴۰۱)
-- `POST /v1/chat/completions` با مدل ناشناس → `400`
-- `POST /v1/chat/completions` با `claude-freeagents` → روت می‌شود (به‌خاطر کلیدهای جعلی، upstream ۵۰۰ می‌دهد ولی روتینگ درست است)
-- `claude-sonnet-4-5` هم روت می‌شود (alias فعال است)
-- `POST /v1/messages` (مسیر Anthropic که Claude Code استفاده می‌کند) هم روت می‌شود
-- هیچ `router_settings` نامعتبری وجود ندارد
+- `/health/liveliness` → ۲۰۰
+- `GET /v1/models` → دقیقاً `["claude-freeagents"]` (alias مخفی hidden)
+- مدل ناشناس → ۴۰۰
+- `claude-freeagents` و `claude-sonnet-4-5` و `/v1/messages` روت می‌شوند (با کلید جعلی upstream ۵۰۰ ولی روتینگ درست)
 
 ```bash
 bash tests/e2e_litellm_real.sh
-# اجرای سریع‌تر با venv آماده:
-LITELLM_E2E_VENV=/tmp/litellm-e2e-venv SKIP_INSTALL=1 bash tests/e2e_litellm_real.sh
 ```
-
-نیازمند دسترسی به PyPI است؛ در نبودش SKIP می‌شود. لاگ: `tests/results/E2E_litellm_real.log` (ignore).
 
 ---
 
@@ -104,44 +93,95 @@ LITELLM_E2E_VENV=/tmp/litellm-e2e-venv SKIP_INSTALL=1 bash tests/e2e_litellm_rea
 
 **فایل:** [`e2e_real_docker.sh`](e2e_real_docker.sh)
 
-تست تمام‌وکمال دنیای واقعی که روی **WSL2 واقعی با اینترنت** اجرا می‌شود:
+روی WSL2 واقعی با اینترنت:
 
-- نصب کامل از منوی واقعی (قابل انتخاب: `both`/`litellm`/`omniroute` با `E2E_ENGINE`)
-- LiteLLM: `docker ps`، `restart-policy=unless-stopped`، `UI_USERNAME=admin`، `DATABASE_URL`، کانتینر `litellm-db`، health، login پنل (بدون خطای «Not connected to DB!»)، `/v1/models == ["claude-freeagents"]`، روتینگ `claude-sonnet-4-5` و `/v1/messages`
-- OmniRoute: `/healthz`، `.env` (۶۰۰) با `JWT_SECRET`/`API_KEY_SECRET`/`INITIAL_PASSWORD`/`REQUIRE_API_KEY`، لانچر ۷۰۰، login داشبورد `/api/auth/login` با کوکی، combo `claude-freeagents` و اتصال provider
-- یکپارچگی: `freeagents status/credentials/doctor`، `freeagents-boot.sh`، نبود دستورهای قدیمی `litellm`/`omni`، `settings.json` کلاد کد (`ANTHROPIC_MODEL=claude-freeagents` + base URL درست)، پروفایل‌های Claude Desktop (`…a119e`/`…a110e`)
-- حذف کامل از منو: همهٔ کانتینرها، `~/.litellm`، `~/.omniroute`، `~/.free-ai-agents`، `freeagents`، سرویس‌ها و پکیج npm پاک می‌شوند
+- LiteLLM: `docker ps`، `restart-policy=unless-stopped`، `DATABASE_URL`، health، login پنل، `/v1/models == ["claude-freeagents"]`
+- OmniRoute: `/healthz`، `.env` ۶۰۰، login داشبورد، combo `claude-freeagents`
+- یکپارچگی: `freeagents status/credentials/doctor`، `live_test.sh` در `~/.free-ai-agents/`، پروفایل‌های Claude Desktop
+- حذف کامل: `~/.litellm`، `~/.omniroute`، `~/.free-ai-agents/` (شامل `live_test.sh`)، سرویس‌ها و پکیج npm
 
 ```bash
 bash tests/e2e_real_docker.sh
-# فقط LiteLLM:
-E2E_ENGINE=litellm bash tests/e2e_real_docker.sh
-# با کلیدهای واقعی (اختیاری):
-export LITELLM_E2E_REAL_KEYS=1 LITELLM_E2E_GROQ="gsk_..." 
-bash tests/e2e_real_docker.sh
 ```
-
-پیش‌نیاز: WSL2 + Docker + Node + دسترسی به `ghcr.io` و `npmjs.org`؛ خارج از WSL یا بدون شبکه SKIP می‌شود.
 
 ---
 
-## 📁 ساختار پوشهٔ tests
+## ۴️⃣ لایهٔ چهارم — تست زندهٔ upstream با کلید واقعی (هر دو گیت‌وی)
+
+**فایل‌های مرتبط:**
+- سورس در ریپو: [`freeagents/live_test.sh`](../freeagents/live_test.sh) — پوشهٔ مرتبط با freeagents
+- نصب‌شده در سیستم: `~/.free-ai-agents/live_test.sh` (۷۵۵) — با `freeagents uninstall` خودکار حذف می‌شود
+
+این تست فقط وقتی اجرا می‌شود که کلید واقعی داشته باشی؛ در سندباکس و بدون کلید، خودکار **SKIP** می‌شود.
+
+**چه چیزی را با کلید واقعی اعتبار سنجی می‌کند؟**
+
+| گیت‌وی | لودبالانسر؟ | چه چیزی تست می‌شود |
+|---|---|---|
+| **LiteLLM** | ✅ بله — `router_settings`: `simple-shuffle` + `num_retries=3` + `allowed_fails=3` + `cooldown_time=30` — همهٔ deploymentهای `claude-freeagents` پشت یک گروه، اگر یکی fail بده بعدی خودکار امتحان می‌شود | health ۲۰۰، `/v1/models` دقیقاً `claude-freeagents`، تعداد deploymentها در `config.yaml`، برای هر provider که کلید دادی: تست مستقیم کلید + `POST /v1/chat/completions` واقعی از مسیر گیت‌وی (باید ۲۰۰ بده)، alias مخفی `claude-sonnet-4-5` روت می‌شود، `/v1/messages` روت می‌شود، `freeagents doctor litellm` OK |
+| **OmniRoute** | ✅ بله — combo `claude-freeagents` با `strategy: auto` — OmniRoute خودش بین مدل‌های combo لودبالانس و failover می‌کند | `/healthz` ۲۰۰، `.env` secretها طول درست، login داشبورد با کوکی، `/api/providers` ≥۱، `/api/combos` شامل `claude-freeagents` و لیست مدل‌های داخل combo، برای هر provider: `POST /api/providers/{id}/test` + `POST /v1/messages` و `POST /v1/chat/completions` واقعی از مسیر OmniRoute (باید ۲۰۰)، `freeagents doctor omniroute` OK |
+
+**چجوری باهاش کار کنم؟**
+
+```bash
+# 1) نصب با کلید واقعی (اگر قبلاً نصب کردی، لازم نیست دوباره):
+bash setup.sh   # منو 1 -> 3 (Both) -> کلیدهای واقعی رو بده
+
+# 2) بعد از نصب، فایل تست زنده خودکار اینجاست:
+ls -l ~/.free-ai-agents/live_test.sh
+# -rwxr-xr-x ... /home/<user>/.free-ai-agents/live_test.sh
+
+# 3) اجرا با کلیدهای ذخیره شده (از provider_keys.env می‌خونه):
+~/.free-ai-agents/live_test.sh
+# یا از ریپو:
+bash freeagents/live_test.sh
+
+# فقط یک موتور:
+E2E_ENGINE=litellm ~/.free-ai-agents/live_test.sh
+E2E_ENGINE=omniroute ~/.free-ai-agents/live_test.sh
+
+# با کلیدهای صریح (برای CI):
+GROQ_API_KEY=gsk_... GEMINI_API_KEY=AIza... bash freeagents/live_test.sh
+
+# لاگ:
+cat ~/.free-ai-agents/logs/live_test.log
+```
+
+خروجی موفق:
+```
+[LIVE-E2E] ok  - GET /health/liveliness -> 200
+[LIVE-E2E] ok  - GET /v1/models -> exactly ['claude-freeagents']
+[LIVE-E2E] ok  - POST /v1/chat/completions claude-freeagents -> 200 (real upstream works!)
+[LIVE-E2E] ok  - combo 'claude-freeagents' exists
+[LIVE-E2E] ok  - POST /v1/messages claude-freeagents via OmniRoute -> 200
+[LIVE-E2E] LIVE RESULT: PASS
+```
+
+- ۴۰۱/۴۰۳ = کلید اشتباه یا geo-block (پراکسی ویندوز رو روشن کن: منو ۹ → ۱ → `freeagents restart`)
+- ۴۲۹ = سهمیه تموم شده (LiteLLM خودش بعدی رو امتحان می‌کنه، ولی تست مستقیم ۴۲۹ می‌ده)
+- با `freeagents uninstall` یا `freeagents uninstall --yes`، کل پوشهٔ `~/.free-ai-agents/` شامل `live_test.sh` پاک می‌شود.
+
+---
+
+## 📁 ساختار پوشه‌ها
 
 ```
-tests/
-├── README.md               ← همین سند
-├── run_all_tests.sh        ← سوئیت ۲۳ سناریویی آفلاین (T00–T22)
-├── e2e_litellm_real.sh     ← E2E با LiteLLM واقعی (PyPI/venv)
-├── e2e_real_docker.sh      ← E2E با Docker+npm واقعی (WSL2 شما)
-├── helpers/
-│   ├── mock_omniroute.py   ← mock کامل REST OmniRoute (login, providers, keys, combos)
-│   └── stubbin/            ← بدل‌های ایزوله: sudo, apt-get, docker(.installer),
-│                              npm, node, curl, powershell.exe, service, systemctl,
-│                              omniroute(.installer)
-└── results/
-    └── summary.txt         ← فقط همین فایل کامیت می‌شود (لاگ‌ها ignore)
+FreeAI-Agents/
+├── setup.sh                     ← نصاب واحد هر دو گیت‌وی
+├── freeagents/
+│   └── live_test.sh             ← تست زندهٔ upstream (سورس) — موقع نصب به ~/.free-ai-agents/live_test.sh کپی می‌شود
+├── tests/
+│   ├── run_all_tests.sh         ← سوئیت ۲۳ سناریویی آفلاین (T00–T22)
+│   ├── e2e_litellm_real.sh      ← E2E با LiteLLM واقعی (PyPI/venv)
+│   ├── e2e_real_docker.sh       ← E2E با Docker+npm واقعی (WSL2 شما)
+│   ├── helpers/
+│   │   ├── mock_omniroute.py    ← mock کامل REST OmniRoute
+│   │   └── stubbin/             ← بدل‌های ایزوله
+│   └── results/
+│       └── summary.txt          ← فقط همین فایل کامیت می‌شود
+└── docs/                        ← مستندات فارسی
 ```
 
-`.gitignore` لاگ‌های `results/*.log` و بدل‌های تولیدشدهٔ `stubbin/docker` و `stubbin/omniroute` را نادیده می‌گیرد — این دو فایل در هر تست از روی `*.installer` کپی می‌شوند.
+`.gitignore` لاگ‌های `results/*.log` و بدل‌های تولیدشدهٔ `stubbin/docker` و `stubbin/omniroute` را نادیده می‌گیرد.
 
 </div>
