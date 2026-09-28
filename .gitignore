@@ -1,0 +1,12 @@
+# Generated test artefacts -----------------------------------------------------
+# The suite writes one log per scenario; only summary.txt is kept in git.
+tests/results/*.log
+# These two are *templates* copied into place by the stubs at runtime
+# (apt-get -> stubbin/docker, npm -> stubbin/omniroute).
+tests/helpers/stubbin/docker
+tests/helpers/stubbin/omniroute
+
+# Editor / OS noise ------------------------------------------------------------
+.DS_Store
+*.swp
+*~

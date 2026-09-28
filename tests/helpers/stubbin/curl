@@ -2,42 +2,62 @@
 #-------------------------------------------------------------------------------
 # Test stub: curl
 #
-# - Provider key-verification endpoints (groq/openrouter/google/cerebras/
-#   mistral) answer with KEYCHECK_CODE (default: 200).
-# - Anything else using -w '%{http_code}' (the health check) answers with
-#   HEALTH_CODE (default: 200).
+#   * every call to the mock OmniRoute server (127.0.0.1:$MOCK_OMNI_PORT) is
+#     handed to the real curl - the mock is a real HTTP server on purpose, so
+#     the cookie jar / JSON handling of the script is exercised for real.
+#   * provider key-verification endpoints answer with KEYCHECK_CODE (200).
+#   * a call made through -x <proxy> answers with PROXY_CALL_CODE when set
+#     (used to simulate a reachable Windows proxy).
+#   * anything else using -w '%{http_code}' (the LiteLLM health check and the
+#     doctor live test) answers with HEALTH_CODE (200).
+#   * a download of setup.sh is served from FAKE_SELF_SOURCE when set (used by
+#     the update / self-heal tests).
 #-------------------------------------------------------------------------------
-# Serve a fake secondary-engine installer when the tests provide one
-# (honours curl's -o <file> so the caller's output file is really written)
-if [ -n "${FAKE_OMNI_SCRIPT:-}" ] && [ -f "${FAKE_OMNI_SCRIPT}" ]; then
+LOG="${T_WORKSTATE:-/tmp}/curl-calls.log"
+[ -n "${T_WORKSTATE:-}" ] && printf 'curl %s\n' "$*" >> "$LOG"
+
+MOCK_PORT="${MOCK_OMNI_PORT:-20871}"
+
+for a in "$@"; do
+  case "$a" in
+    "http://127.0.0.1:${MOCK_PORT}"*|"http://localhost:${MOCK_PORT}"*)
+      exec /usr/bin/curl "$@"
+      ;;
+  esac
+done
+
+# serve the script itself for update / self-heal tests
+if [ -n "${FAKE_SELF_SOURCE:-}" ] && [ -f "${FAKE_SELF_SOURCE}" ]; then
   for a in "$@"; do
     case "$a" in
-      *OmniRoute-OpenCode*)
+      *setup.sh*)
+        target=""
         prev=""
         for a2 in "$@"; do
-          if [ "$prev" = "-o" ]; then
-            cat "${FAKE_OMNI_SCRIPT}" > "$a2"
-            exit 0
-          fi
+          if [ "$prev" = "-o" ]; then target="$a2"; fi
           prev="$a2"
         done
-        cat "${FAKE_OMNI_SCRIPT}"
+        if [ -n "$target" ]; then
+          cat "$FAKE_SELF_SOURCE" > "$target"
+        else
+          cat "$FAKE_SELF_SOURCE"
+        fi
         exit 0
         ;;
     esac
   done
 fi
+
 is_proxied=0
 for a in "$@"; do
   case "$a" in
     -x) is_proxied=1 ;;
   esac
 done
+
 for a in "$@"; do
   case "$a" in
-    *api.groq.com*|*openrouter.ai*|*generativelanguage.googleapis.com*|*api.cerebras.ai*|*api.mistral.ai*)
-      # a call explicitly routed through -x simulates the installer's proxy
-      # test call (PROXY_CALL_CODE lets tests fail it on purpose)
+    *api.groq.com*|*openrouter.ai*|*generativelanguage.googleapis.com*|*api.cerebras.ai*|*api.mistral.ai*|*models.inference.ai.azure.com*|*api.sambanova.ai*|*integrate.api.nvidia.com*|*api.together.xyz*)
       if [ "$is_proxied" -eq 1 ] && [ -n "${PROXY_CALL_CODE:-}" ]; then
         printf '%s' "$PROXY_CALL_CODE"
         exit 0
@@ -47,18 +67,17 @@ for a in "$@"; do
       ;;
   esac
 done
-# /v1/models list for the doctor command (2 Groq models, matching the
-# groq-only install used in the offline tests)
+
+# /v1/models list for the doctor command (must contain the branded model id)
 for a in "$@"; do
   case "$a" in
     http://127.0.0.1:4000/v1/models)
-      echo '{"data":[{"id":"claude-gpt-oss-120b","object":"model"},{"id":"claude-gpt-oss-20b","object":"model"}]}'
+      echo '{"data":[{"id":"claude-freeagents","object":"model"}]}'
       exit 0
       ;;
   esac
 done
-# chat completions (doctor live test): falls through to the generic
-# '%{http_code}' handler below (prints HEALTH_CODE, default 200).
+
 code="${HEALTH_CODE:-200}"
 if [ "$is_proxied" -eq 1 ] && [ -n "${PROXY_CALL_CODE:-}" ]; then
   printf '%s' "$PROXY_CALL_CODE"

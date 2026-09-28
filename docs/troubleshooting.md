@@ -2,7 +2,12 @@
 
 # 🛠️ عیب‌یابی خطاهای رایج
 
-جدول زیر رایج‌ترین خطاها و راه‌حل‌های آن‌هاست. اگر مشکل شما اینجا نبود، در گیت‌هاب Issue باز کنید.
+جدول زیر رایج‌ترین خطاها و راه‌حل‌های آن‌هاست. اگر مشکل شما اینجا نبود، در گیت‌هاب Issue باز کنید. برای تشخیص سریع در همهٔ موارد، اول این دو دستور را در WSL بزنید:
+
+```bash
+freeagents status      # وضعیت و health هر دو گیت‌وی
+freeagents doctor      # تشخیص عمیق: اتصال ارائه‌دهنده‌ها + درخواست واقعی
+```
 
 ---
 
@@ -23,13 +28,6 @@ sed -i 's/\r$//' setup.sh
 bash setup.sh
 ```
 
-یا:
-
-```bash
-dos2unix setup.sh 2>/dev/null || sed -i 's/\r$//' setup.sh
-bash setup.sh
-```
-
 **پیشگیری:**
 
 - بهترین راه، همان اجرای یک‌خطی با `curl` است — فایل مستقیم و با خط‌پایان درست (LF) به WSL می‌رسد و اصلاً از ویندوز رد نمی‌شود:
@@ -38,13 +36,11 @@ bash setup.sh
   bash <(curl -fsSL https://raw.githubusercontent.com/im-JvD/FreeAI-Agents/main/setup.sh)
   ```
 
-- این اسکریپت از نسخهٔ فعلی مخزن، **محافظ self-heal** دارد: اگر نسخهٔ CRLF را با `bash setup.sh` اجرا کنید، خودش یک نسخهٔ تمیز می‌سازد و ادامهٔ نصب را با آن انجام می‌دهد (مگر در اجرای مستقیم `./setup.sh` که خطای shebang را همان اول می‌گیرید — در آن حالت از `bash setup.sh` استفاده کنید).
-
-- اگر خودتان مخزن را در ویندوز clone می‌کنید، فایل `.gitattributes` موجود در مخزن جلوی تبدیل خط‌پایان را می‌گیرد.
+- اسکریپت **محافظ self-heal** دارد: اگر نسخهٔ CRLF را با `bash setup.sh` اجرا کنید، خودش یک نسخهٔ تمیز می‌سازد و ادامهٔ نصب را با آن انجام می‌دهد (مگر در اجرای مستقیم `./setup.sh` که خطای shebang را همان اول می‌گیرید — در آن حالت از `bash setup.sh` استفاده کنید).
 
 ---
 
-## 🔴 خطاهای مرحلهٔ دانلود/داکر
+## 🟠 خطاهای گیت‌وی LiteLLM (داکر)
 
 ### `docker pull` خطای 403، `toomanyrequests` یا `TLS handshake timeout` می‌دهد
 
@@ -69,37 +65,65 @@ LITELLM_IMAGE=<registry>/berriai/litellm:main-latest bash setup.sh
 LITELLM_PULL_RETRIES=5 bash setup.sh
 ```
 
-نکته: اگر قبلاً pull موفق داشته‌اید، ایمیج هنوز لوکال است (`sudo docker images`) و نصاب با همان ادامه می‌دهد.
-
-### `Cannot connect to the Docker daemon`
-
-دیمن داکر بالا نیامده (معمولاً بعد از `wsl --shutdown`):
+### `Cannot connect to the Docker daemon` / `docker: command not found`
 
 ```bash
-sudo service docker start
+sudo service docker start          # یا: sudo systemctl start docker
 sudo docker ps
-```
-
-### `docker: command not found`
-
-نصب داکر ناقص بوده:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y docker.io
-sudo service docker start
+# اگر داکر نصب نیست:
+sudo apt-get update && sudo apt-get install -y docker.io && sudo service docker start
 ```
 
 ### `address already in use` روی پورت 4000
 
-پورت اشغال است:
-
 ```bash
-sudo ss -ltnp | grep 4000        # چه چیزی گرفته؟
-sudo docker rm -f litellm        # اگر کانتینر قبلی است، حذف و نصب مجدد با پورت جدید
+sudo ss -ltnp | grep 4000          # چه چیزی گرفته؟
+LITELLM_PORT=4010 bash setup.sh    # نصب مجدد روی پورت جدید
 ```
 
-یا متغیر `LITELLM_PORT` در ابتدای اسکریپت را به مثلاً `4010` تغییر دهید و دوباره نصب کنید.
+---
+
+## 🟢 خطاهای گیت‌وی OmniRoute (npm)
+
+### `npm install` خطا می‌دهد (`ETIMEDOUT` / `403` / `EACCES`)
+
+اسکریپت اول از `npmjs.org` نصب می‌کند و اگر شکست بخورد، خودکار `registry.npmmirror.com` را امتحان می‌کند. برای تلاش دوباره یا نصب اجباری:
+
+```bash
+OMNIROUTE_FORCE_NPM_INSTALL=1 bash setup.sh
+# یا دستی:
+sudo npm install -g omniroute --registry=https://registry.npmmirror.com
+```
+
+### OmniRoute بالا نمی‌آید / لحظهٔ بوت کرش می‌کند
+
+روی این سرویس، secretهای کوتاه باعث **fail-fast در استارت** می‌شوند:
+
+```
+Invalid web runtime environment: "JWT_SECRET" is too short (26 chars, minimum 32)
+```
+
+حداقل‌ها: `JWT_SECRET ≥ 32`، `API_KEY_SECRET ≥ 16`، `INITIAL_PASSWORD ≥ 8`. نصاب این مقادیر را ۶۴ کاراکتری می‌سازد و بین نصب‌ها حفظ می‌کند؛ اگر دستی‌شان عوض کرده‌اید:
+
+```bash
+freeagents doctor omniroute        # بررسی سلامت + لاگ
+grep -E 'JWT_SECRET|API_KEY_SECRET|INITIAL_PASSWORD' ~/.omniroute/.env | cut -c1-40
+freeagents restart                 # بعد از اصلاح، ری‌استارت
+```
+
+### پورت 20128 اشغال است
+
+```bash
+sudo ss -ltnp | grep 20128
+OMNIROUTE_PORT=20129 bash setup.sh
+```
+
+### `omniroute: command not found` بعد از نصب
+
+```bash
+which omniroute || sudo npm install -g omniroute
+cat ~/.free-ai-agents/logs/omniroute.log      # لاگ لانچر
+```
 
 ---
 
@@ -124,15 +148,16 @@ Interop ویندوز در WSL غیرفعال است. در ویندوز فایل 
 powershell.exe -NoProfile -Command "[Environment]::GetFolderPath('UserProfile')"
 ```
 
-خروجی باید چیزی شبیه `C:\Users\Your Name` باشد.
+خروجی باید چیزی شبیه `C:\Users\Your Name` باشد. اگر ویندوز ندارید (تست/محیط لینوکسی): `FREEAGENTS_SKIP_WINDOWS=1 bash setup.sh`.
 
-### Claude Code به پروکسی وصل نمی‌شود (مدلی در `/model` نمی‌بینم)
+### Claude Code به گیت‌وی وصل نمی‌شود (مدلی در `/model` نمی‌بینم)
 
 1. مسیر فایل را چک کنید: `%USERPROFILE%\.claude\settings.json`
 2. JSON معتبر است؟ فایل را در VSCode باز کنید — نقل‌قول‌ها باید مستقیم (`"`) باشند نه هوشمند/فارسی.
 3. کلاد کد را **کاملاً** ببندید و دوباره باز کنید (بلوک `env` فقط هنگام شروع خوانده می‌شود).
 4. کشف مدل گیت‌وی به نسخهٔ **v2.1.129 به بعد** نیاز دارد: `claude --version` و در صورت نیاز آپدیت.
 5. متغیر قدیمی `ANTHROPIC_BASE_URL` یا `ANTHROPIC_API_KEY` دیگری در ویندوز (Environment Variables سیستم) تنظیم شده؟ مقدار قدیمی روی `settings.json` **اولویت دارد** — پاکش کنید.
+6. گیت‌وی فعال را چک کنید: `freeagents status` — اگر گیت‌وی فعال روی OmniRoute است ولی آن سرویس خوابیده، کلاد چیزی نمی‌بیند.
 
 ---
 
@@ -140,227 +165,140 @@ powershell.exe -NoProfile -Command "[Environment]::GetFolderPath('UserProfile')"
 
 ### Claude Code خطای `401` / `Unauthorized` می‌دهد
 
-`ANTHROPIC_AUTH_TOKEN` کلاد کد با Master Key پروکسی نمی‌خواند. بررسی:
+توکن داخل `settings.json` با توکن گیت‌وی فعال نمی‌خواند. توکن درست:
+
+| گیت‌وی فعال | توکن | مسیر |
+|---|---|---|
+| LiteLLM | Master Key | `~/.litellm/master_key.txt` |
+| OmniRoute | کلید کلاینت | `~/.free-ai-agents/omniroute_claude.key` |
 
 ```bash
-cat ~/.litellm/master_key.txt
+freeagents credentials      # همهٔ توکن‌ها/URLها یکجا
 ```
 
-سپس فایل `%USERPROFILE%\.claude\settings.json` را در ویندوز باز کنید و مقدار `ANTHROPIC_AUTH_TOKEN` را با خروجی بالا مقایسه کنید. هر دو باید یکسان باشند. ساده‌ترین راه هماهنگ‌سازی: دوباره گزینهٔ `1` را اجرا کنید تا هر دو فایل از نو و هماهنگ ساخته شوند.
+سپس مقدار `ANTHROPIC_AUTH_TOKEN` را در `settings.json` با آن یکی کنید. ساده‌ترین راه هماهنگ‌سازی: منو → `9` (Config Manager) → `4` (Re-apply the Claude configuration) یا نصب مجدد.
 
-### اپ Claude Desktop مدل‌های گیت‌وی را نشان نمی‌دهد
+### اپ Claude Desktop مدل گیت‌وی را نشان نمی‌دهد
 
-1. نصاب به‌طور خودکار اتصال اپ را در رجیستری می‌نویسد (`HKCU\SOFTWARE\Policies\Claude`) — مطمئن شوید بعد از نصاب، اپ را **کاملاً** بسته و دوباره باز کرده‌اید (فهرست مدل‌ها فقط هنگام باز شدن گرفته می‌شود).
-2. پیکر مدل اپ Desktop فقط اسم‌هایی را می‌بیند که شامل `claude` باشند — نصاب عمداً اسم‌ها را با پیشوند `claude-` می‌سازد (`claude-gpt-oss-120b` و…). نصاب را دوباره اجرا کنید تا `config.yaml` با همین اسم‌ها بازسازی شود، سپس `freeagents restart`.
-3. اگر نصاب پیام «Could not write the Claude Desktop policy» داد (دسترسی رجیستری) یا با `LITELLM_DESKTOP_CONFIG=0` نصب کرده‌اید، دستی تنظیم کنید: **Help > Troubleshooting > Enable Developer Mode** بعد **Developer > Configure Third-Party Inference…** — راهنمای کامل در [usage.md](usage.md) بخش ۵.
-4. اگر کانکشن را دستی ست کرده‌اید، مقدار `Gateway base URL` باید **بدون `/v1`** باشد: `http://127.0.0.1:4000`
+1. نصاب برای هر گیت‌وی یک پروفایل در `%LOCALAPPDATA%\Claude-3p\configLibrary\<uuid>.json` می‌سازد (LiteLLM: `…a119e` — OmniRoute: `…a110e`) و `_meta.json` را به‌روز می‌کند. مطمئن شوید اپ را بعد از نصاب **کاملاً** بسته و باز کرده‌اید (فهرست مدل‌ها هنگام باز شدن گرفته می‌شود).
+2. پیکر مدل اپ فقط idهای حاوی `claude`/`anthropic` را نشان می‌دهد؛ مدل نصاب (`claude-freeagents`) همین شرط را دارد و برای سازگاری، alias مخفی `claude-sonnet-4-5` هم به همان مدل وصل است.
+3. اگر پروفایل را دستی ست می‌کنید: **Help > Troubleshooting > Enable Developer Mode** → **Developer > Configure Third-Party Inference…** — راهنمای کامل در [usage.md](usage.md) بخش ۵. مقدار `Gateway base URL` باید **بدون `/v1`** باشد: `http://127.0.0.1:4000` یا `http://127.0.0.1:20128`.
+4. اگر «Invalid: Model list» می‌بینید و Apply غیرفعال است، پروفایل را از نو بسازید: منو → `9` → `5` (Switch the ACTIVE gateway) و بعد از آن اپ‌ها را ری‌استارت کنید.
 
-### نصب موتور دوم در مرحلهٔ «Installing the secondary gateway» معلق به نظر می‌رسد
-
-دو حالت دارد:
-
-1. **سکوت چنددقیقه‌ای طبیعی است** — دانلود ایمیج و راه‌اندازی سرویس بدون خروجی انجام می‌شود؛ نقطه‌چین‌های ضربان‌نما (هر ۳ ثانیه یک نقطه) نشانِ زنده‌بودن است.
-2. اگر بیش از ~۳۰ دقیقه بماند، نصب‌کننده به‌طور خودکار متوقف می‌شود (TIMEOUT) و ۱۵ خط آخر لاگ نمایش داده می‌شود.
-
-برای دیدن پیشرفت زنده در ترمینال دوم:
+### چطور گیت‌وی فعال را عوض کنم (کلاد کد + دسکتاپ)؟
 
 ```bash
-tail -f ~/.free-ai-agents/logs/secondary-install.log
+# منو → گزینهٔ 9 (Config Manager) → گزینهٔ 5 (Switch the ACTIVE gateway)
+freeagents      # باز کردن منو
 ```
 
-اگر لاگ روی یک سؤال تعاملی توقف کرده بود (نسخه‌های قدیمی‌تر اسکریپت)، `Ctrl+C` بزنید و نصب را دوباره اجرا کنید — نسخهٔ فعلی با `OMNIRoute_FORCE_NO_TTY=1` اجرا می‌کند و **هیچ‌وقت** پشت یک سؤال نامرئی منتظر نمی‌ماند.
+`settings.json`، پروفایل دسکتاپ (`appliedId` در `_meta.json`) و همهٔ توکن‌ها هم‌زمان به‌روز می‌شوند. بعد از تعویض، اپ‌های Claude را کامل ببندید و باز کنید.
 
-### پایین صفحهٔ کانفیگ اپ «Invalid: Model list» می‌بینم و Apply Changes غیرفعال است
+### مدل جواب نمی‌دهد (`429` / `quota exceeded`)
 
-نسخه‌های جدید اپ، نام مدل‌های `inferenceModels` را اعتبارسنجی می‌کنند و فقط نام‌های کاتالوگ Anthropic (مثل `claude-sonnet-4-5`) یا مسیرهای `anthropic/claude-*` را می‌پذیرند. نصاب به‌همین دلیل دو نام استاندارد `claude-sonnet-4-5` و `claude-haiku-4-5` را به‌عنوان alias روی همان مدل‌های رایگان به `config.yaml` اضافه می‌کند و پروفایل دسکتاپ را با همین نام‌ها می‌نویسد. اگر هنوز خطا دارید، اسکریپت را یک‌بار با گزینهٔ ۴ (Update) به‌روز کنید تا پروفایل بازنویسی شود.
-
-### چطور بین پروفایل‌های ذخیره‌شدهٔ اپ جابه‌جا شویم؟ (Free Agents / پروفایل دیگر)
-
-- **از داخل اپ:** در همان صفحهٔ کانفیگ، از منوی کشویی بالا (کنار Export) پروفایل را انتخاب و **Apply Changes** بزنید؛ نشان «applied ✓» باید جابه‌جا شود. سپس اپ را کامل ببندید و باز کنید تا لیست مدل‌ها تازه شود.
-- **از ترمینال:** منوی اسکریپت → `8` (Config Manager) → `5` (Switch the ACTIVE desktop profile) → سپس اپ را از آیکون Tray کامل Quit و دوباره باز کنید.
-
-### پاک‌سازی دستی پروفایل‌های قدیمی/تکراری در اپ Desktop
-
-اگر از نسخه‌های قبلی اسکریپت پروفایل‌های تکراری دارید، دو راه دارید:
-
-**راه ۱ — از خود اپ (توصیه‌شده):** در صفحهٔ کانفیگ، منوی کشویی بالا → هر پروفایل اضافی را انتخاب → **Delete** (قرمز، انتهای منو). برای هر سه پروفایل تکرار کنید و بعد نصاب را دوباره اجرا کنید.
-
-**راه ۲ — از فایل‌سیستم:**
-1. اپ را کامل ببندید (آیکون Tray → Quit؛ در صورت نیاز از Task Manager هم `Claude.exe` را END کنید).
-2. در Explorer آدرس `%LOCALAPPDATA%\Claude-3p\configLibrary` را باز کنید.
-3. همهٔ فایل‌های `*.json` شامل `_meta.json` را حذف کنید. (اگر پوشهٔ `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude-3p` هم موجود بود، همان‌جا هم تکرار کنید.)
-4. اپ را باز کنید؛ سپس `bash setup.sh` → گزینهٔ `1` تا پروفایل Free Agents دوباره ساخته شود، و برای پروفایل دیگر: `bash ~/.free-ai-agents/OmniRoute.sh --install`.
-
-> نکته: نسخهٔ جدید نصاب، پروفایل قدیمی با id غیر UUID را هنگام هر نصب/آپدیت **خودکار حذف** می‌کند و انتخاب فعلی («applied») پروفایل دیگر را دست‌نخورده نگه می‌دارد.
-
-### چت معمولی اپ Desktop به پروکسی نمی‌رود (اکانت می‌خواهد)
-
-رفتار طبیعی است: پنجرهٔ چت کلاسیک اپ Desktop **مستقیم به سرور Anthropic** وصل می‌شود و با LiteLLM کاری ندارد. اتصال Gateway فقط برای بخش ایجنت (**Cowork**) و نشست‌های Code داخل اپ اعمال می‌شود. برای استفادهٔ رایگان از مدل‌های پروکسی، Cowork یا Claude Code را به‌کار ببرید.
-
-### `429` یا `quota exceeded` از سمت ارائه‌دهنده
-
-سهمیهٔ رایگان مدل تمام شده. مدل دیگری انتخاب کنید یا کلید همان سرویس را شارژ/تعویض کنید.
-
-### کانتینر Up است ولی مدل جواب نمی‌دهد
-
-لاگ‌ها را ببینید:
+سهمیهٔ رایگان آن ارائه‌دهنده تمام شده. در LiteLLM، router خودش deployment بعدی را امتحان می‌کند (retry/cooldown) و در OmniRoute هم combo با `strategy: auto` همین کار را می‌کند. برای بررسی:
 
 ```bash
-sudo docker logs -f litellm
+freeagents doctor            # کدام ارائه‌دهنده خطا می‌دهد؟
+freeagents logs litellm      # یا: freeagents logs omniroute
 ```
 
-اگر `401` از سمت Groq/Gemini و… می‌بینید، کلید همان ارائه‌دهنده اشتباه یا منقضی است — کلید درست را بگیرید و دوباره گزینهٔ `1` را اجرا کنید.
+### خطای `403 Forbidden` / بلاک منطقه‌ای (Groq / Google / Cerebras)
 
----
-
-### خطای `403 Forbidden` از Groq (یا 401 از سایر ارائه‌دهنده‌ها) هنگام چت
-
-پیام در داشبورد/لاگ:
-
-```
+```text
 GroqException - {"error":{"message":"Forbidden"}}
+Google: "User location is not supported for the API use"
 ```
 
-یعنی کلیدی که در خانهٔ Groq وارد شده، از نظر Groq نامعتبر است. رایج‌ترین علت: **کلیدها جابجا وارد شده‌اند** (مثلاً کلید OpenRouter در خانهٔ Groq). راه تشخیص سریع:
+شرکت‌های آمریکایی درخواست‌های IP ایران را در لبهٔ شبکه رد می‌کنند — حتی با کلید کاملاً معتبر. راه‌حل‌ها:
 
-```bash
-sudo docker inspect litellm | grep GROQ_API_KEY
-```
+1. **بدون VPN:** نصاب را دوباره اجرا کنید و به سؤال `Route provider traffic through your Windows proxy?` جواب `y` بدهید (Clash/v2rayN/Hiddify روی ویندوز با **Allow LAN**). ترافیک هر دو گیت‌وی از همان پراکسی رد می‌شود. بعد: `freeagents restart`.
+2. **VPN سمت ویندوز** با حالت system-wide (TUN) + `freeagents restart`.
+3. اگر هیچ‌کدام را نمی‌خواهید، ارائه‌دهنده‌های مسدود را بدون کلید بگذارید (نصاب را دوباره اجرا کنید و آن خانه‌ها را خالی رد کنید) تا از گروه مدل حذف شوند.
 
-- اگر با `gsk_` شروع نمی‌شود، همان جابجایی است.
-- راه‌حل: نصاب را دوباره اجرا کنید، در سؤال «Keep these keys?» بزنید **`n`** و کلیدها را درست وارد کنید:
-  - Groq → کلیدی که با `gsk_` شروع می‌شود
-  - OpenRouter → کلیدی که با `sk-or-` شروع می‌شود
-
-نصاب از این نسخه **هر کلید را قبل از ساخت کانتینر به‌صورت زنده تست می‌کند** و اگر کلیدی رد شود (401/403) همان لحظه اعلام و پیشنهاد اصلاح می‌دهد. نکته: «could not verify» یعنی شبکه به آن سرویس نمی‌رسد (مثلاً Google بدون VPN) — این شکست نیست؛ کلید ممکن است سالم باشد.
-
----
-
-### فقط یک مدل (مثلاً Mistral) جواب می‌دهد و بقیه خطا می‌دهند — مسدودسازی منطقه‌ای
-
-اگر `freeagents doctor` (یا داشبورد) نشان دهد که کلیدها معتبرند ولی موقع چت، مدل‌های خاصی خطا می‌دهند، محتمل‌ترین علت **مسدودسازی جغرافیایی** است: شرکت‌های آمریکایی (Groq، Google، Cerebras و گاهی OpenRouter در بعضی شبکه‌ها) درخواست‌های IP ایران را در لبهٔ شبکه رد می‌کنند — حتی با کلید کاملاً معتبر:
-
-```
-GroqException - {"error":{"message":"Forbidden"}}          ← Cloudflare، بلاک منطقه
-Google: "User location is not supported for the API use"   ← بلاک رسمی Google
-```
-
-Mistral (فرانسه) معمولاً از ایران کار می‌کند — برای همین «فقط Mistral جواب می‌دهد».
-
-**تشخیص دقیق — دستور جدید:**
-
-```bash
-litellm doctor
-```
-
-این دستور سه کار می‌کند: وضعیت پشته را نشان می‌دهد، اتصال مستقیم به هر ارائه‌دهنده را تست می‌کند (`reachable / REJECTED / UNREACHABLE`) و **برای تک‌تک مدل‌ها یک درخواست چت واقعی از طریق پروکسی می‌زند** و نتیجه را با کد خطا چاپ می‌کند. خروجی‌اش را بفرستید تا دقیق بگوییم کدام سرویس چه مشکلی دارد.
-
-**راه‌حل:**
-
-1. یک VPN **سمت ویندوز** با حالت system-wide (TUN) روشن کنید — ترافیک WSL2 از ویندوز عبور می‌کند و از VPN رد می‌شود. سپس `freeagents restart` و دوباره `freeagents doctor` — همهٔ مدل‌ها باید OK شوند.
-2. **بدون VPN هم می‌شود:** نصاب را دوباره اجرا کنید و به سؤال `Route provider traffic through your Windows proxy?` جواب `y` بدهید (برنامهٔ پراکسی مثل Clash/v2rayN/Hiddify باید روی ویندوز در حال اجرا و با Allow LAN باشد). سپس `freeagents restart` — ترافیک Google/Cerebras از پراکسی ویندوز رد می‌شود.
-2. اگر نمی‌خواهید VPN دائمی باشد: مدل‌های قابل‌دسترس را نگه دارید (مثلاً Mistral + OpenRouter) و بقیه را از کانفیگ حذف کنید تا در پیکر `/model` کلاد کد ظاهر نشوند:
-   - مدل‌های ناموجود را از `~/.litellm/config.yaml` حذف کنید (بلوک کامل `- model_name: ...`)
-   - چون پیکر مدل، فهرست را مستقیم از خود پروکسی می‌خواند (کشف گیت‌وی)، همین یک مرحله کافی است
-   - `freeagents restart` (یا نصاب را دوباره اجرا کنید)
+> در `freeagents doctor`، وضعیت پراکسی و نتیجهٔ اتصال هر ارائه‌دهنده (`reachable / REJECTED / UNREACHABLE`) و همچنین یک درخواست واقعی از مسیر گیت‌وی نمایش داده می‌شود.
 
 ---
 
 ## 🟣 هشدار «does not look like a X key»
 
-این هشدار یعنی کلیدی که در آن خانه وارد کرده‌اید با پیشوند شناخته‌شدهٔ آن سرویس نمی‌خواند — معمولاً یعنی کلیدها جابجا وارد شده‌اند (مثلاً کلید OpenRouter در خانهٔ Groq). پیشوندهای درست:
+این هشدار یعنی کلیدی که در آن خانه وارد کرده‌اید با پیشوند شناخته‌شدهٔ آن سرویس نمی‌خواند — معمولاً یعنی کلیدها جابجا وارد شده‌اند. پیشوندهای درست:
 
 | سرویس | پیشوند |
 |---|---|
 | Groq | `gsk_` |
 | OpenRouter | `sk-or-` |
-| Google AI | `AIza` |
+| Google AI Studio | `AIza` |
 | Cerebras | `csk-` |
-| Mistral | (پیشوند ثابتی ندارد، بررسی نمی‌شود) |
+| NVIDIA NIM | `nvapi-` |
+| Mistral / GitHub / SambaNova / Together | (پیشوند ثابتی ندارند، بررسی نمی‌شود) |
 
-با کلید جابجا، نصب کامل می‌شود ولی موقع چت خطای 401 می‌گیرید. کافی است نصاب را دوباره اجرا کنید و کلیدها را درست وارد کنید.
+نصاب هر کلید را **قبل از نصب به‌صورت زنده تست می‌کند** و اگر رد شود (401/403)، همان لحظه اعلام و پیشنهاد واردکردن مجدد می‌دهد. «could not verify» یعنی شبکه به آن سرویس نمی‌رسد (مثلاً Google بدون پراکسی) — این شکست کلید نیست.
 
 ---
 
-## 🟢 خطاهای مدیریت و پنل
+## 🔵 خطاهای مدیریت و پنل‌ها
 
-### `litellm: command not found`
+### `freeagents: command not found` / `litellm: command not found`
 
-CLI مدیریت نصب نشده یا حذف شده — دوباره گزینهٔ `1` نصاب را اجرا کنید. مسیر: `/usr/local/bin/litellm`.
-
-### خطای «Authentication Error, Not connected to DB!» هنگام Login به پنل
-
-این شناخته‌شده‌ترین محدودیت نسخه‌های جدید LiteLLM است: **ورود به Admin UI بدون یک دیتابیس Postgres اصلاً ممکن نیست** — حتی اگر نام کاربری و رمز را درست بزنید. پیام پشت صحنه:
-
-```json
-{"error":{"message":"Authentication Error, Not connected to DB!","type":"auth_error","code":"400"}}
-```
-
-نصاب این مشکل را کامل حل کرده: یک کانتینر Postgres به نام `litellm-db` کنار پروکسی بالا می‌آورد (از داکرهاب و از طریق میرورهای ایرانی) و `DATABASE_URL` را به کانتینر `litellm` می‌دهد. پس در نصب‌های جدید این خطا نباید ظاهر شود. اگر دیدید:
+CLI مدیریت نصب نشده (یا نسخهٔ قدیمی با `litellm`/`omni` را صدا می‌زنید). فقط یک دستور وجود دارد:
 
 ```bash
-sudo docker ps                     # هر دو کانتینر litellm و litellm-db باید Up باشند
-litellm restart                    # اولین بوت بعد از ساخت DB، مایگریشن انجام می‌دهد (کمی صبر)
-sudo docker logs litellm 2>&1 | grep -i "database\|prisma" | tail -20
+ls -l /usr/local/bin/freeagents        # باید وجود داشته باشد
+freeagents help                        # راهنمای دستورات
 ```
 
-اگر قبل از این نسخه نصب کرده‌اید (بدون دیتابیس)، یک بار نصاب را دوباره اجرا کنید تا کانتینر DB هم ساخته شود.
+اگر نبود، نصاب را دوباره اجرا کنید — نسخهٔ جدید دستورهای قدیمی `litellm`/`omni` را هم پاک می‌کند.
 
-- می‌خواهید بدون DB اجرا کنید؟ `LITELLM_UI_DB=0 bash setup.sh` — در این حالت UI لاگین ندارد ولی **چت از طریق Claude Code کاملاً کار می‌کند** (پروکسی به DB نیازی ندارد).
+### خطای «Authentication Error, Not connected to DB!» هنگام Login به پنل LiteLLM
 
----
+ورود به Admin UI لایت‌ال‌ال‌ام **بدون دیتابیس Postgres ممکن نیست**. نصاب خودش کانتینر `litellm-db` را می‌سازد (`LITELLM_UI_DB=1` پیش‌فرض) و `DATABASE_URL` را به پروکسی می‌دهد.
 
-### پنل `http://127.0.0.1:4000/ui` باز نمی‌شود یا Login نمی‌شود
+```bash
+sudo docker ps                                  # هر دو کانتینر باید Up باشند
+freeagents restart                              # اولین بوت بعد از ساخت DB کمی طول می‌کشد
+LITELLM_UI_DB=0 bash setup.sh                   # یا: اجرا بدون DB (چت سالم، UI بدون ورود)
+```
+
+### پنل LiteLLM باز نمی‌شود یا Login نمی‌شود
 
 - پروکسی روشن است؟ `freeagents status`
-- نام کاربری دقیقاً `admin` و رمز همان Master Key است.
-- ⚠️ **پسورد جداگانه وجود ندارد** — رشتهٔ `sk-...` همان پسورد است. همه را یکجا ببینید:
+- یوزر `admin` و رمز = **Master Key** (پسورد جداگانه وجود ندارد):
 
   ```bash
-  litellm credentials
-  # یا
+  freeagents credentials
   cat ~/.litellm/dashboard_credentials.txt
   ```
 
-- پسورد را کپی کنید (بدون فاصلهٔ ابتدا/انتها) و در فرم بچسبانید.
-- از مرورگر **ویندوز** باز کنید نه داخل WSL (هرچند هر دو کار می‌کند).
-
-### بعد از ری‌استارت ویندوز/WSL کانتینر بالا نیامد
+### داشبورد OmniRoute باز نمی‌شود
 
 ```bash
-litellm up        # همین کافی است
+curl -s http://127.0.0.1:20128/healthz        # باید ok بدهد
+freeagents logs omniroute                     # لاگ زنده
+grep INITIAL_PASSWORD ~/.omniroute/.env       # رمز ورود داشبورد
+```
+
+اگر رمز را عوض کردید و یادتان نیست، مقدار `INITIAL_PASSWORD` را در `~/.omniroute/.env` به یک رمز ≥ ۸ کاراکتری تغییر دهید و `freeagents restart` بزنید.
+
+### بعد از ری‌استارت ویندوز/WSL چیزی بالا نیامد
+
+```bash
+freeagents up        # همین کافی است (هر دو گیت‌وی)
 ```
 
 بررسی مکانیزم استارت خودکار:
 
 ```bash
-systemctl status litellm 2>/dev/null || grep -A1 '\[boot\]' /etc/wsl.conf
-cat /tmp/litellm-boot.log
+systemctl status litellm 2>/dev/null
+systemctl status omniroute 2>/dev/null
+grep -A1 '\[boot\]' /etc/wsl.conf
 ```
 
-اگر systemd ندارید و می‌خواهید کانفیگ درست شود، دوباره گزینهٔ `1` را اجرا کنید.
+اگر systemd ندارید: نصاب با حالت `wslconf` یک boot command (`/usr/local/bin/freeagents-boot.sh`) می‌گذارد.
 
 ---
 
-## 🔵 موارد عمومی
-
-### بعد از `wsl --shutdown` هیچ‌چیز کار نمی‌کند
-
-داکر خودکار بالا نمی‌آید مگر systemd فعال باشد:
-
-```bash
-sudo service docker start
-sudo docker ps          # کانتینر باید خودش Up شده باشد (restart policy)
-```
-
-برای فعال‌سازی دائمی، در `/etc/wsl.conf` اوبونتو:
-
-```ini
-[boot]
-systemd=true
-```
-
-سپس در ویندوز: `wsl --shutdown` و بازکردن مجدد.
+## ⚪ موارد عمومی
 
 ### Master Key را گم کردم
 
@@ -371,14 +309,21 @@ cat ~/.litellm/master_key.txt
 ### چطور وضعیت کلی را یکجا ببینم؟
 
 ```bash
+freeagents status
+# بررسی دستی:
 sudo docker ps --filter name=litellm
-sudo docker inspect -f '{{.State.Status}} | {{.HostConfig.RestartPolicy.Name}}' litellm
 curl -s http://127.0.0.1:4000/health/liveliness
-curl -s http://127.0.0.1:4000/v1/models -H "Authorization: Bearer $(cat ~/.litellm/master_key.txt)"
+curl -s http://127.0.0.1:20128/healthz
 ```
 
 ### اجرای دوبارهٔ اسکریپت امن است؟
 
-بله — نصب مجدد (گزینهٔ `1`) اول کانتینر قبلی را حذف می‌کند و همه‌چیز را از نو و هماهنگ می‌سازد. کلیدهای API قبلی را هم **نگه می‌دارد**: فقط می‌پرسد «Keep these keys? [Y/n]» — با Enter همان‌ها حفظ و با `n` کلیدهای جدید پرسیده می‌شود. Master Key هم ثابت می‌ماند. حذف (گزینهٔ `2`) هم idempotent است.
+بله — نصب مجدد (گزینهٔ `1`) کانتینر/سرویس قبلی را حذف و همه‌چیز را هماهنگ بازسازی می‌کند. کلیدهای API قبلی **نگه داشته می‌شوند** («Keep these keys? [Y/n]»)، Master Key و secretهای OmniRoute هم ثابت می‌مانند. حذف (گزینهٔ `6`) هم idempotent است.
+
+### به‌روزرسانی اسکریپت
+
+```bash
+freeagents update       # دانلود از همین ریپو + نصب مجدد با حفظ کلیدها
+```
 
 </div>

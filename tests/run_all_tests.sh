@@ -2,19 +2,25 @@
 #===============================================================================
 # tests/run_all_tests.sh
 #
-# OFFLINE (simulated) test-suite for the LiteLLM <-> Claude Code setup script.
+# OFFLINE (simulated) test-suite for the unified Free AI Agents installer
+# (setup.sh v4: LiteLLM  +  OmniRoute  ->  Claude Code / Claude Desktop).
 #
-# How it works:
+# How it works
 #   - every external command the script touches (docker, apt-get, service,
-#     systemctl, curl, powershell.exe, sudo) is replaced by a deterministic
-#     stub from tests/helpers/stubbin
-#   - /etc/docker writes are virtualized into a temporary FAKE_ROOT
+#     systemctl, curl, npm, node, sudo, powershell.exe) is replaced by a
+#     deterministic stub from tests/helpers/stubbin
+#   - /etc/docker, /usr/local/bin, /etc/systemd and /etc/wsl.conf writes are
+#     virtualized into a temporary FAKE_ROOT by the sudo stub
 #   - the Windows user profile is emulated under /mnt/c/Users/<Test User>
 #     (a dedicated fake folder, never a real profile; removed on exit)
-#   - every scenario runs the REAL script end-to-end and asserts on:
-#       exit codes, generated config.yaml, generated Claude settings.json,
-#       master-key consistency, daemon.json mirrors, docker run arguments,
-#       container lifecycle and uninstall behavior
+#   - OmniRoute is a REAL HTTP server: tests/helpers/mock_omniroute.py mirrors
+#     the official REST surface (session cookie login, provider upsert, API
+#     keys, combos, live catalog), so the installer's management flow is
+#     exercised end-to-end instead of being asserted on paper
+#   - every scenario runs the REAL script and asserts on exit codes, the
+#     generated LiteLLM config.yaml, the generated OmniRoute .env, the Claude
+#     Code settings.json, the Claude Desktop profiles, docker/npm calls,
+#     boot persistence and uninstall behavior
 #
 # Results:  tests/results/<test-name>.log  +  tests/results/summary.txt
 #
@@ -28,6 +34,9 @@ TESTS_DIR="${ROOT_DIR}/tests"
 STUBBIN="${TESTS_DIR}/helpers/stubbin"
 RESULTS_DIR="${TESTS_DIR}/results"
 SUMMARY_FILE="${RESULTS_DIR}/summary.txt"
+REAL_CURL="/usr/bin/curl"
+
+MOCK_PORT="${MOCK_OMNI_PORT:-20871}"
 
 mkdir -p "$RESULTS_DIR"
 
@@ -40,27 +49,45 @@ T_WORK=""
 T_WORKSTATE=""
 FAKE_ROOT=""
 HOME_DIR=""
-REAL_DAEMON_STATE=""   # "", "was-present", "seeded-absent"
-REAL_DAEMON_BACKUP=""
+T_RC=""
+T_BOOT_MODE="wslconf"
+T_UI_DB="1"
+T_HEALTH_CODE="200"
+T_KEYCHECK_CODE="200"
+T_PROXY_CALL_CODE=""
+T_PULL_RETRIES="1"
+T_HEALTH_WAIT_SEC="2"
+T_OMNI_WAIT_SEC="4"
+T_SKIP_WINDOWS="0"
+T_KEY_CHECK="1"
+T_REJECT_LOGIN=""
+T_SELF_UPDATE=""
 CREATED_PROFILE_DIRS=()
 CURRENT_LOG=""
+MNT_OK=1
 
-ALL7_MODELS=$'claude-gpt-oss-120b\nclaude-gpt-oss-20b\nclaude-deepseek-v3.1\nclaude-deepseek-v3-0324\nclaude-gemini-2.0-flash\nclaude-llama3.1-70b\nclaude-codestral\nclaude-sonnet-4-5\nclaude-haiku-4-5'
-GROQ2_MODELS=$'claude-gpt-oss-120b\nclaude-gpt-oss-20b\nclaude-sonnet-4-5\nclaude-haiku-4-5'
-OR2_MODELS=$'claude-deepseek-v3.1\nclaude-deepseek-v3-0324\nclaude-sonnet-4-5\nclaude-haiku-4-5'
-GEMINI1_MODELS=$'claude-gemini-2.0-flash\nclaude-sonnet-4-5\nclaude-haiku-4-5'
+GROQ_KEY="gsk_test_groq_0123456789abcd"
+OR_KEY="sk-or-test_0123456789abcd"
+GEMINI_KEY="AIzaTest0123456789abcd"
+CEREBRAS_KEY="csk-test_0123456789abcd"
+MISTRAL_KEY="sk_mistral_test012345678"
+GITHUB_KEY="ghp_test_0123456789abcd"
+SAMBANOVA_KEY="sn-test_0123456789abcd"
+NVIDIA_KEY="nvapi-test_0123456789abcd"
+TOGETHER_KEY="tog-test_0123456789abcd"
+
 
 cleanup() {
-  # remove fake Windows profile dirs created for the tests (never real ones)
+  mock_stop
   local d
   for d in "${CREATED_PROFILE_DIRS[@]:-}"; do
     [ -n "$d" ] && rm_rf_sudo "$d"
   done
-  # restore host daemon.json if the backup test seeded it
-  if [ "$REAL_DAEMON_STATE" = "was-present" ] && [ -f "$REAL_DAEMON_BACKUP" ]; then
-    cp_sudo "$REAL_DAEMON_BACKUP" /etc/docker/daemon.json
-  elif [ "$REAL_DAEMON_STATE" = "seeded-absent" ]; then
-    rm_f_sudo /etc/docker/daemon.json
+  if [ "${MNT_OK:-0}" -eq 1 ] && [ -d /mnt/c/Users ]; then
+    local u
+    for u in "Test User" "Ali Rezaei"; do
+      [ -d "/mnt/c/Users/${u}" ] && rm_rf_sudo "/mnt/c/Users/${u}"
+    done
   fi
   [ -n "$T_WORK" ] && [ -d "$T_WORK" ] && rm -rf "$T_WORK"
   return 0
@@ -75,76 +102,124 @@ pass_test() { PASS=$((PASS+1)); msg "PASS  ${T_NAME}"; echo "PASS  ${T_NAME}" >>
 skip_test() { SKIP=$((SKIP+1)); msg "SKIP  ${T_NAME} - $*"; echo "SKIP  ${T_NAME} - $*" >> "$SUMMARY_FILE"; }
 fail_test() { FAIL=$((FAIL+1)); msg "FAIL  ${T_NAME} - $*"; echo "FAIL  ${T_NAME} - $*" >> "$SUMMARY_FILE"; }
 
-# root/sudo helpers (work as root or via sudo, otherwise fail softly)
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi
 }
 rm_rf_sudo() { as_root rm -rf "$1" 2>/dev/null || true; }
-rm_f_sudo()  { as_root rm -f "$1" 2>/dev/null || true; }
 cp_sudo()    { as_root cp "$1" "$2" 2>/dev/null || true; }
 
 start_test() {
   T_NAME="$1"
   CURRENT_LOG="${RESULTS_DIR}/${T_NAME}.log"
   : > "$CURRENT_LOG"
+  A_FAILURES=0
+  T_RC=""
+  T_BOOT_MODE="wslconf"; T_UI_DB="1"; T_HEALTH_CODE="200"; T_KEYCHECK_CODE="200"
+  T_PROXY_CALL_CODE=""; T_PULL_RETRIES="1"; T_HEALTH_WAIT_SEC="2"; T_OMNI_WAIT_SEC="4"
+  T_SKIP_WINDOWS="0"; T_KEY_CHECK="1"; T_REJECT_LOGIN=""
+  T_SELF_UPDATE=""
 }
+
+#-------------------------------------------------------------------------------
+# Mock OmniRoute server
+#-------------------------------------------------------------------------------
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+pick_mock_port() {
+  local candidate="${MOCK_OMNI_PORT:-20871}" i
+  for i in $(seq 0 20); do
+    if ! port_in_use "$((candidate + i))"; then
+      MOCK_PORT="$((candidate + i))"
+      export OMNIROUTE_PORT="$MOCK_PORT"
+      return 0
+    fi
+  done
+  msg "no free port for the mock OmniRoute server"; return 1
+}
+
+# The OmniRoute "server" is started by the installer itself (the npm stub execs
+# the mock), so stopping it means killing the process its PID file points at.
+mock_stop() {
+  local pidf="${HOME_DIR}/.free-ai-agents/omniroute.pid" pid=""
+  [ -n "${HOME_DIR:-}" ] && pid="$(cat "$pidf" 2>/dev/null | head -1 || true)"
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    sleep 0.2
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  return 0
+}
+
+mock_state() { "$REAL_CURL" -s --max-time 5 "http://127.0.0.1:${MOCK_PORT}/__state" 2>/dev/null; }
+mock_requests() { cat "${T_WORKSTATE}/mock-requests.log" 2>/dev/null; }
 
 #-------------------------------------------------------------------------------
 # Fresh isolated environment per test
 #-------------------------------------------------------------------------------
 fresh_env() {
-  # deterministic start: make sure no docker stub is left in STUBBIN
-  # (tests that need it install it explicitly, e.g. T16)
-  rm -f "${STUBBIN}/docker"
-  T_WORK="$(mktemp -d /tmp/litellm-test.XXXXXX)"
+  rm -f "${STUBBIN}/docker" "${STUBBIN}/omniroute"
+  pick_mock_port || return 1
+  T_WORK="$(mktemp -d /tmp/freeai-test.XXXXXX)"
   T_WORKSTATE="${T_WORK}/state"
   FAKE_ROOT="${T_WORK}/fakeroot"
   HOME_DIR="${T_WORK}/home"
   mkdir -p "$T_WORKSTATE" "$FAKE_ROOT" "$HOME_DIR"
+  mkdir -p "${FAKE_ROOT}/usr/local/bin" "${FAKE_ROOT}/etc/docker" "${FAKE_ROOT}/etc/systemd/system"
   : > "${T_WORKSTATE}/docker-calls.log"
   : > "${T_WORKSTATE}/apt-calls.log"
+  : > "${T_WORKSTATE}/npm-calls.log"
+  : > "${T_WORKSTATE}/node-calls.log"
+  : > "${T_WORKSTATE}/omniroute-calls.log"
+  : > "${T_WORKSTATE}/curl-calls.log"
+  : > "${T_WORKSTATE}/mock-requests.log"
+  : > "${T_WORKSTATE}/powershell-calls.log"
   : > "${T_WORKSTATE}/containers.txt"
   : > "${T_WORKSTATE}/container-running.txt"
   : > "${T_WORKSTATE}/images.txt"
-  # reset shared fake Windows profiles so every test starts clean
+  # Emulate an existing Windows profile (a real WSL always has one) so the
+  # Claude Code / Claude Desktop writers exercise their full path.
   for u in "Test User" "Ali Rezaei"; do
-    for d in "/mnt/c/Users/${u}/.config" "/mnt/c/Users/${u}/.claude"; do
-      [ -w "$d" ] && rm -rf "$d"
+    for d in "/mnt/c/Users/${u}/.claude" "/mnt/c/Users/${u}/AppData/Local/Claude-3p/configLibrary"; do
+      rm -rf "$d" 2>/dev/null || true
+      mkdir -p "$d" 2>/dev/null || true
     done
   done
-  return 0 2>/dev/null || true
-  # mirror the host /etc/docker/daemon.json into the virtual root (if any),
-  # so the script's backup branch behaves consistently
-  if [ -f /etc/docker/daemon.json ]; then
-    mkdir -p "${FAKE_ROOT}/etc/docker"
-    cp /etc/docker/daemon.json "${FAKE_ROOT}/etc/docker/daemon.json"
-  fi
+  return 0
 }
 
-# Runs the real script inside the isolated environment.
-# Expected input (menu choices / keys) is piped in by the caller.
+script_lib() { # writes a sourceable copy of setup.sh (without the main call)
+  local lib="${T_WORK}/setup_lib.sh"
+  sed '$ d' "$SCRIPT_FILE" > "$lib"
+  printf '%s' "$lib"
+}
+
 run_script() { # optional $1 = path of the script copy to run (default: the real one)
   local script_file="${1:-$SCRIPT_FILE}"
-  env -u DOCKER_PULL_FAIL -u DOCKER_APT_FAIL \
+  env -u DOCKER_PULL_FAIL -u DOCKER_APT_FAIL -u NPM_FAIL_REGISTRY \
     HOME="$HOME_DIR" \
-    PATH="${STUBBIN}:${PATH}" \
+    PATH="${STUBBIN}:/usr/bin:/bin:/usr/sbin:/sbin" \
     STUBBIN="$STUBBIN" \
     T_WORKSTATE="$T_WORKSTATE" \
     FAKE_ROOT="$FAKE_ROOT" \
-    HEALTH_CODE="${T_HEALTH_CODE:-200}" \
-    LITELLM_BOOT_MODE="${T_BOOT_MODE:-auto}" \
-    LITELLM_PULL_RETRIES="${T_PULL_RETRIES:-3}" \
-    LITELLM_UI_DB="${T_UI_DB:-1}" \
-    LITELLM_HEALTH_WAIT_SEC="${T_HEALTH_WAIT_SEC:-}" \
-    KEYCHECK_CODE="${T_KEYCHECK_CODE:-200}" \
-    PROXY_CALL_CODE="${T_PROXY_CALL_CODE:-}" \
-    PS_DESKTOP_DENY="${T_PS_DESKTOP_DENY:-}" \
-    FAKE_OMNI_SCRIPT="${T_FAKE_OMNI:-}" \
+    MOCK_OMNI_PORT="$MOCK_PORT" \
+    OMNIROUTE_PORT="$MOCK_PORT" \
+    MOCK_REJECT_LOGIN="$T_REJECT_LOGIN" \
+    HEALTH_CODE="$T_HEALTH_CODE" \
+    KEYCHECK_CODE="$T_KEYCHECK_CODE" \
+    PROXY_CALL_CODE="$T_PROXY_CALL_CODE" \
+    FAKE_SELF_SOURCE="$T_SELF_UPDATE" \
+    FREEAGENTS_BOOT_MODE="$T_BOOT_MODE" \
+    LITELLM_UI_DB="$T_UI_DB" \
+    LITELLM_PULL_RETRIES="$T_PULL_RETRIES" \
+    LITELLM_HEALTH_WAIT_SEC="$T_HEALTH_WAIT_SEC" \
+    OMNIROUTE_HEALTH_WAIT_SEC="$T_OMNI_WAIT_SEC" \
+    FREEAGENTS_SKIP_WINDOWS="$T_SKIP_WINDOWS" \
+    FREEAGENTS_KEY_CHECK="$T_KEY_CHECK" \
     bash "$script_file" >> "$CURRENT_LOG" 2>&1
 }
 
 #-------------------------------------------------------------------------------
-# Assertion helpers (each failure is logged and counted)
+# Assertion helpers
 #-------------------------------------------------------------------------------
 A_FAILURES=0
 a_ok()   { echo "    ok: $*" >> "$CURRENT_LOG"; }
@@ -153,11 +228,11 @@ a_bad()  { echo "    ASSERTION FAILED: $*" >> "$CURRENT_LOG"; A_FAILURES=$((A_FA
 assert_rc() { # $1 expected rc
   if [ "${T_RC:-999}" = "$1" ]; then a_ok "exit code = $1"; else a_bad "exit code expected $1, got ${T_RC:-unset}"; fi
 }
-assert_contains() { # $1 file, $2 needle (fixed string)
-  if grep -qF -- "$2" "$1" 2>/dev/null; then a_ok "contains: $2"; else a_bad "expected to contain: $2"; fi
+assert_contains() { # $1 file, $2 needle
+  if grep -qF -- "$2" "$1" 2>/dev/null; then a_ok "contains: $2"; else a_bad "expected '$2' in $1"; fi
 }
 assert_not_contains() { # $1 file, $2 needle
-  if grep -qF -- "$2" "$1" 2>/dev/null; then a_bad "expected NOT to contain: $2"; else a_ok "not contains: $2"; fi
+  if grep -qF -- "$2" "$1" 2>/dev/null; then a_bad "did not expect '$2' in $1"; else a_ok "not contains: $2"; fi
 }
 assert_file_exists() {
   if [ -e "$1" ]; then a_ok "file exists: $1"; else a_bad "file missing: $1"; fi
@@ -165,188 +240,147 @@ assert_file_exists() {
 assert_file_missing() {
   if [ ! -e "$1" ]; then a_ok "file missing: $1"; else a_bad "file should not exist: $1"; fi
 }
-assert_models() { # $1 config.yaml path, $2 expected (newline separated)
-  local got expected="$2"
-  got="$(model_names "$1")"
-  if [ -z "$got" ]; then a_bad "could not extract models from: $1"; return; fi
-  if [ "$got" = "$expected" ]; then
-    a_ok "models match (${expected//$'\n'/, })"
-  else
-    a_bad "models mismatch: got [${got//$'\n'/, }] expected [${expected//$'\n'/, }]"
-  fi
+assert_mode() { # $1 file, $2 octal
+  local mode
+  mode="$(stat -c '%a' "$1" 2>/dev/null || true)"
+  if [ "$mode" = "$2" ]; then a_ok "mode $2 on $1"; else a_bad "mode of $1 is ${mode:-?}, expected $2"; fi
 }
-
-# Extract model_name list from generated config.yaml
-# Uses PyYAML when available; falls back to a structural sed extraction.
-model_names() {
-  local out rc
-  out="$(python3 - "$1" <<'PY' 2>/dev/null
-import sys
-try:
-    import yaml
-except Exception:
-    sys.exit(3)
-try:
-    cfg = yaml.safe_load(open(sys.argv[1]))
-except Exception:
-    sys.exit(4)
-for m in (cfg.get("model_list") or []):
-    print(m.get("model_name", ""))
+assert_json() { # $1 json file, $2 python expression over d, $3 label
+  if python3 - "$1" "$2" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert eval(sys.argv[2]), sys.argv[2]
 PY
-)"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    printf '%s' "$out"
-    return 0
-  fi
-  # structural fallback (no PyYAML installed)
-  sed -n 's/^  - model_name: //p' "$1" 2>/dev/null
+  then a_ok "$3"; else a_bad "$3"; fi
 }
-
-# Full validation of a generated Claude Code settings.json
-# $1 = file, $2 = master key, $3 = expected main model, $4 = expected fast/background model
-assert_claude_settings() {
-  python3 - "$1" "$2" "$3" "$4" <<'PY'
-import sys, json
-path, mkey, main_model, fast_model = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-fails = 0
-def bad(msg):
-    global fails
-    fails += 1
-    print(f"    ASSERTION FAILED (settings.json): {msg}")
-try:
-    cfg = json.load(open(path))
-except Exception as e:
-    bad(f"invalid JSON: {e}")
-    sys.exit(1)
-env = cfg.get("env") or {}
-if env.get("ANTHROPIC_BASE_URL") != "http://127.0.0.1:4000":
-    bad(f"ANTHROPIC_BASE_URL mismatch: {env.get('ANTHROPIC_BASE_URL')} (must have NO /v1 suffix)")
-if env.get("ANTHROPIC_AUTH_TOKEN") != mkey:
-    bad("ANTHROPIC_AUTH_TOKEN does not match master key")
-if env.get("ANTHROPIC_MODEL") != main_model:
-    bad(f"ANTHROPIC_MODEL mismatch: {env.get('ANTHROPIC_MODEL')}")
-if env.get("ANTHROPIC_SMALL_FAST_MODEL") != fast_model:
-    bad(f"ANTHROPIC_SMALL_FAST_MODEL mismatch: {env.get('ANTHROPIC_SMALL_FAST_MODEL')}")
-if env.get("ANTHROPIC_DEFAULT_SONNET_MODEL") != main_model:
-    bad("ANTHROPIC_DEFAULT_SONNET_MODEL mismatch")
-if env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL") != fast_model:
-    bad("ANTHROPIC_DEFAULT_HAIKU_MODEL mismatch")
-if env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") != "1":
-    bad("gateway model discovery not enabled")
-if fails == 0:
-    print("    ok: Claude Code settings.json fully valid")
-sys.exit(1 if fails else 0)
+assert_mock() { # $1 python expression over the mock state, $2 label
+  if python3 - "$2" <<PY 2>/dev/null
+import json, sys, urllib.request
+state = json.load(urllib.request.urlopen("http://127.0.0.1:${MOCK_PORT}/__state"))
+$1
 PY
-  local rc=$?
-  if [ $rc -ne 0 ]; then A_FAILURES=$((A_FAILURES+1)); else a_ok "Claude settings valid ($1)"; fi
-  return $rc
+  then a_ok "$2"; else a_bad "$2"; fi
 }
-
-assert_daemon_json_mirrors() { # $1 = daemon.json path
-  python3 - "$1" <<'PY'
-import sys, json
-expected = ["https://docker.arvancloud.ir",
-            "https://docker.hub.iran.liara.run",
-            "https://docker.iranserver.com"]
-try:
-    mirrors = json.load(open(sys.argv[1])).get("registry-mirrors")
-except Exception as e:
-    print(f"    ASSERTION FAILED: daemon.json invalid: {e}"); sys.exit(1)
-if mirrors != expected:
-    print(f"    ASSERTION FAILED: mirrors mismatch: {mirrors}"); sys.exit(1)
-print("    ok: daemon.json mirrors exact")
-PY
-  if [ $? -ne 0 ]; then A_FAILURES=$((A_FAILURES+1)); else a_ok "daemon.json mirrors exact ($1)"; fi
+assert_models() { # $1 config.yaml, $2 expected count of the branded group
+  local count
+  count="$(grep -c "^  - model_name: " "$1" 2>/dev/null || true)"
+  if [ "${count:-0}" = "$2" ]; then a_ok "config.yaml has $2 deployment(s)"; else a_bad "expected $2 deployments, got ${count:-0}"; fi
+}
+assert_mirrors() { # $1 daemon.json
+  assert_json "$1" 'd["registry-mirrors"] == ["https://docker.arvancloud.ir","https://docker.hub.iran.liara.run","https://docker.iranserver.com"]' "daemon.json mirrors exact"
+}
+assert_claude_settings() { # $1 settings.json $2 expected token $3 expected base url
+  assert_json "$1" "d['env']['ANTHROPIC_BASE_URL'] == '$3'" "settings.json base url = $3"
+  assert_json "$1" "d['env']['ANTHROPIC_AUTH_TOKEN'] == '$2'" "settings.json token matches"
+  assert_json "$1" "d['env']['ANTHROPIC_MODEL'] == 'claude-freeagents'" "settings.json model id"
+  assert_json "$1" "d['env']['CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY'] == '1'" "gateway model discovery enabled"
+  assert_json "$1" "d['env']['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] == '120000'" "auto compact window set"
+  assert_json "$1" "'ANTHROPIC_API_KEY' not in d['env']" "no ANTHROPIC_API_KEY (bearer only)"
+}
+assert_env_line() { # $1 env file, $2 key, $3 expected value
+  local got
+  got="$(awk -v k="$2" 'index($0, k "=") == 1 { sub("^" k "=", ""); print; exit }' "$1" 2>/dev/null)"
+  if [ "$got" = "$3" ]; then a_ok "env $2 = $3"; else a_bad "env $2 is '${got}', expected '$3'"; fi
 }
 
 finish_test() {
   if [ "$A_FAILURES" -eq 0 ]; then pass_test; else fail_test "${A_FAILURES} assertion(s) failed - see ${CURRENT_LOG}"; fi
   A_FAILURES=0
+  mock_stop
   [ -n "$T_WORK" ] && [ -d "$T_WORK" ] && rm -rf "$T_WORK"
 }
 
-# dump auxiliary state into the test log (for committed evidence)
 dump_state() {
   {
-    echo; echo "--- docker-calls.log ---";     cat "${T_WORKSTATE}/docker-calls.log" 2>/dev/null
-    echo; echo "--- apt-calls.log ---";        cat "${T_WORKSTATE}/apt-calls.log" 2>/dev/null
-    echo; echo "--- containers.txt ---";       cat "${T_WORKSTATE}/containers.txt" 2>/dev/null
-    echo; echo "--- generated config.yaml ---";  cat "${HOME_DIR}/.litellm/config.yaml" 2>/dev/null
-    echo; echo "--- generated daemon.json (virtual) ---"; cat "${FAKE_ROOT}/etc/docker/daemon.json" 2>/dev/null
+    echo; echo "--- docker-calls.log ---"; cat "${T_WORKSTATE}/docker-calls.log" 2>/dev/null
+    echo; echo "--- apt-calls.log ---"; cat "${T_WORKSTATE}/apt-calls.log" 2>/dev/null
+    echo; echo "--- npm/node calls ---"; cat "${T_WORKSTATE}/npm-calls.log" "${T_WORKSTATE}/node-calls.log" 2>/dev/null
+    echo; echo "--- mock requests ---"; mock_requests
+    echo; echo "--- mock state ---"; mock_state
+    echo; echo "--- generated config.yaml ---"; cat "${HOME_DIR}/.litellm/config.yaml" 2>/dev/null
+    echo; echo "--- generated OmniRoute .env ---"; sed 's/^\(JWT_SECRET\|API_KEY_SECRET\|INITIAL_PASSWORD\)=.*/\1=<hidden>/' "${HOME_DIR}/.omniroute/.env" 2>/dev/null
     echo; echo "--- generated Claude settings.json ---"; cat "/mnt/c/Users/Test User/.claude/settings.json" 2>/dev/null
   } >> "$CURRENT_LOG"
 }
 
-master_key_from() { cat "${HOME_DIR}/.litellm/master_key.txt" 2>/dev/null | tr -d '\n'; }
-master_key_in_docker_run() {
-  grep -o 'LITELLM_MASTER_KEY=[^ ]*' "${T_WORKSTATE}/docker-calls.log" 2>/dev/null | head -1 | cut -d= -f2
-}
+master_key_from() { tr -d '\n' < "${HOME_DIR}/.litellm/master_key.txt" 2>/dev/null; }
+litellm_docker_run() { grep -o 'LITELLM_MASTER_KEY=[^ ]*' "${T_WORKSTATE}/docker-calls.log" 2>/dev/null | head -1 | cut -d= -f2; }
 
 #-------------------------------------------------------------------------------
 # Preflight
 #-------------------------------------------------------------------------------
-msg "LiteLLM <-> Claude Code offline test-suite"
+# The Windows-side tests emulate C:\Users\<name> under /mnt/c. In a real WSL
+# that mount is writable; inside a container it may have to be created once.
+setup_windows_drive() {
+  MNT_OK=1
+  mkdir -p /mnt/c 2>/dev/null || true
+  if [ -d /mnt/c ] && [ -w /mnt/c ]; then return 0; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    if sudo mkdir -p /mnt/c/Users 2>/dev/null && sudo chmod 777 /mnt/c/Users 2>/dev/null; then
+      return 0
+    fi
+  fi
+  MNT_OK=0
+  msg "Windows-side emulation unavailable (cannot write /mnt/c) - those scenarios will be SKIPPED"
+}
+
+# every stub must be executable (git does not always preserve the bit)
+chmod +x "${STUBBIN}"/* 2>/dev/null || true
+
+msg "Free AI Agents (LiteLLM + OmniRoute) offline test-suite"
 msg "script under test: ${SCRIPT_FILE}"
+setup_windows_drive
 
 echo "SUITE RUN - $(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$SUMMARY_FILE"
 echo "host: $(uname -sr) | user: $(id -un) | bash: ${BASH_VERSION}" >> "$SUMMARY_FILE"
 
 start_test "T00_static_checks"
-A_FAILURES=0
-if [ -f "$SCRIPT_FILE" ]; then a_ok "script file exists"; else a_bad "script file missing"; fi
-if bash -n "$SCRIPT_FILE" 2>>"$CURRENT_LOG"; then a_ok "bash -n (syntax) OK"; else a_bad "bash -n failed"; fi
+if [ -f "$SCRIPT_FILE" ]; then a_ok "script exists"; else a_bad "script missing"; fi
+if bash -n "$SCRIPT_FILE" 2>>"$CURRENT_LOG"; then a_ok "bash -n OK"; else a_bad "bash -n failed"; fi
 if head -1 "$SCRIPT_FILE" | grep -q '^#!/usr/bin/env bash'; then a_ok "shebang OK"; else a_bad "shebang missing"; fi
 if [ -x "$SCRIPT_FILE" ]; then a_ok "executable bit set"; else a_bad "not executable"; fi
-# CRITICAL RULE: script source + terminal output must be 100% ASCII (RTL-safe)
 if LC_ALL=C grep -qP '[^\x09\x0A\x0D\x20-\x7E]' "$SCRIPT_FILE"; then
-  a_bad "non-ASCII characters found in script (breaks RTL terminals)"
+  a_bad "non-ASCII characters in the script"
   LC_ALL=C grep -nP '[^\x09\x0A\x0D\x20-\x7E]' "$SCRIPT_FILE" | head -5 >> "$CURRENT_LOG"
 else
-  a_ok "script is 100% printable ASCII (RTL-safe)"
+  a_ok "script is 100% printable ASCII"
 fi
+assert_contains "$SCRIPT_FILE" 'im-JvD/FreeAI-Agents'
+assert_not_contains "$SCRIPT_FILE" 'OmniRoute-OpenCode'
+assert_not_contains "$SCRIPT_FILE" 'git clone'
+assert_not_contains "$SCRIPT_FILE" 'diegosouzapw/omniroute'
+assert_contains "$SCRIPT_FILE" 'npm install -g'
+assert_contains "$SCRIPT_FILE" 'FreeAgents/LiteLLM'
+assert_contains "$SCRIPT_FILE" 'FreeAgents/Omni'
+assert_contains "$SCRIPT_FILE" 'claude-freeagents'
+if command -v shellcheck >/dev/null 2>&1; then
+  if shellcheck -S warning "$SCRIPT_FILE" >>"$CURRENT_LOG" 2>&1; then a_ok "shellcheck clean (warning level)"; else a_bad "shellcheck reported issues"; fi
+else
+  a_ok "shellcheck not installed - skipped"
+fi
+# a CRLF copy must still work (self-heal guard)
+crlf="${T_WORK:-/tmp}/crlf.sh"
+if [ -z "${T_WORK:-}" ]; then T_WORK="$(mktemp -d /tmp/freeai-test.XXXXXX)"; fi
+crlf="${T_WORK}/crlf.sh"
+sed 's/$/\r/' "$SCRIPT_FILE" > "$crlf"
+if bash "$crlf" version >/dev/null 2>&1; then a_ok "CRLF copy runs (self-heal works)"; else a_bad "CRLF copy failed"; fi
+dump_state 2>/dev/null || true
 finish_test
 
-# prepare the fake Windows profiles under /mnt/c (targeted names only)
-MNT_OK=1
-for u in "Test User" "Ali Rezaei"; do
-  d="/mnt/c/Users/${u}"
-  if [ ! -d "$d" ]; then
-    if as_root mkdir -p "$d" 2>/dev/null && as_root chown "$(id -u):$(id -g)" "$d" 2>/dev/null; then
-      CREATED_PROFILE_DIRS+=("$d")
-    else
-      MNT_OK=0
-    fi
-  else
-    # directory already exists (e.g. re-run); make sure we can write into it
-    [ -w "$d" ] || MNT_OK=0
-  fi
-done
-if [ "$MNT_OK" -eq 1 ]; then
-  msg "fake Windows profiles ready under /mnt/c/Users (isolated names, removed on exit)"
-else
-  msg "WARNING: cannot create /mnt/c fake profiles - profile-dependent tests will SKIP"
-fi
-
-# permissions to manage /etc/docker/daemon.json (needed only by T12/T13)
-CAN_MANAGE_DAEMON=1
-if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
-  CAN_MANAGE_DAEMON=0
-fi
-
 #===============================================================================
-# T01 - full install with all 5 API keys (apt install path)
+# T01 - LiteLLM install (all 5 primary keys + the 4 optional providers)
 #===============================================================================
-start_test "T01_full_install_all_keys"
+start_test "T01_litellm_install_all_keys"
 if [ "$MNT_OK" -eq 1 ]; then
   fresh_env
-  # simulate leftovers from an OLDER script version: a non-UUID profile plus
-  # an applied entry from the other engine that must survive untouched
-  leglib="/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary"
-  mkdir -p "$leglib"
-  printf '{"inferenceProvider":"gateway"}\n' > "${leglib}/litellm-free-ai-agents.json"
-  printf '{"appliedId":"00000000-0000-4000-8000-0000000a110e","entries":[{"id":"00000000-0000-4000-8000-0000000a110e","name":"OmniRoute"},{"id":"litellm-free-ai-agents","name":"LiteLLM"}]}\n' > "${leglib}/_meta.json"
-  printf '1\n\n\n\n\n\n\n\ngsk_test_groq_0123456789abcd\nsk-or-test_0123456789abcd\nAIzaTest0123456789abcd\ncsk-test_0123456789abcd\nsk_mistral_test012345678\n' | run_script
+  # leftovers from the old per-gateway installers must disappear
+  mkdir -p "${FAKE_ROOT}/usr/local/bin"
+  printf '#!/bin/sh\n' > "${FAKE_ROOT}/usr/local/bin/omni"
+  printf '#!/bin/sh\n' > "${FAKE_ROOT}/usr/local/bin/litellm"
+  printf '#!/bin/sh\n' > "${FAKE_ROOT}/usr/local/bin/litellm-boot.sh"
+  printf '1\n1\n\n%s\n%s\n%s\n%s\n%s\ny\n%s\n%s\n%s\n%s\n0\n' \
+    "$GROQ_KEY" "$OR_KEY" "$GEMINI_KEY" "$CEREBRAS_KEY" "$MISTRAL_KEY" \
+    "$GITHUB_KEY" "$SAMBANOVA_KEY" "$NVIDIA_KEY" "$TOGETHER_KEY" | run_script
   T_RC=$?
   assert_rc 0
   assert_contains "$CURRENT_LOG" "INSTALLATION COMPLETED SUCCESSFULLY"
@@ -354,79 +388,39 @@ if [ "$MNT_OK" -eq 1 ]; then
   assert_contains "${T_WORKSTATE}/docker-calls.log" "pull ghcr.io/berriai/litellm:main-latest"
   assert_contains "${T_WORKSTATE}/docker-calls.log" "run -d --name litellm --restart unless-stopped -p 4000:4000"
   assert_contains "${T_WORKSTATE}/docker-calls.log" "-v ${HOME_DIR}/.litellm/config.yaml:/app/config.yaml:ro"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "--config /app/config.yaml --port 4000"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e GROQ_API_KEY=gsk_test_groq_0123456789abcd"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e OPENROUTER_API_KEY=sk-or-test_0123456789abcd"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e GEMINI_API_KEY=AIzaTest0123456789abcd"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e CEREBRAS_API_KEY=csk-test_0123456789abcd"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e MISTRAL_API_KEY=sk_mistral_test012345678"
-  if grep -qxF "litellm" "${T_WORKSTATE}/containers.txt"; then a_ok "container registered"; else a_bad "container not registered"; fi
-  assert_file_exists "${HOME_DIR}/.litellm/config.yaml"
-  assert_file_exists "${HOME_DIR}/.litellm/master_key.txt"
-  assert_models "${HOME_DIR}/.litellm/config.yaml" "$ALL7_MODELS"  # now 9 entries (2 aliases)
-  MK="$(master_key_from)"
-  if [ -n "$MK" ] && [ "$MK" = "$(master_key_in_docker_run)" ]; then a_ok "master key consistent (file == docker env)"; else a_bad "master key mismatch"; fi
-  assert_file_exists "${HOME_DIR}/.litellm/dashboard_credentials.txt"
-  assert_contains "${HOME_DIR}/.litellm/dashboard_credentials.txt" "Username : admin"
-  assert_contains "${HOME_DIR}/.litellm/dashboard_credentials.txt" "Password : ${MK}"
-  assert_contains "$CURRENT_LOG" "Password  : ${MK}"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e UI_PASSWORD=${MK}"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e UI_USERNAME=admin"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e UI_PASSWORD=${MK}"
-  assert_file_exists "${HOME_DIR}/.litellm/db_password.txt"
+  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e GROQ_API_KEY=${GROQ_KEY}"
+  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e TOGETHERAI_API_KEY=${TOGETHER_KEY}"
   assert_contains "${T_WORKSTATE}/docker-calls.log" "run -d --name litellm-db --restart unless-stopped --network litellm-net"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e POSTGRES_USER=litellm"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-v ${HOME_DIR}/.litellm/pgdata:/var/lib/postgresql/data"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "exec litellm-db pg_isready"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e DATABASE_URL=postgresql://litellm:"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "@litellm-db:5432/litellm"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "--network litellm-net"
-  assert_contains "${HOME_DIR}/.litellm/config.yaml" "database_url: os.environ/DATABASE_URL"
+  assert_file_exists "${HOME_DIR}/.litellm/config.yaml"
+  assert_models "${HOME_DIR}/.litellm/config.yaml" 18
+  assert_contains "${HOME_DIR}/.litellm/config.yaml" "model_name: claude-freeagents"
+  assert_contains "${HOME_DIR}/.litellm/config.yaml" "model: nvidia_nim/meta/llama-3.3-70b-instruct"
+  assert_contains "${HOME_DIR}/.litellm/config.yaml" "model: together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo"
+  assert_contains "${HOME_DIR}/.litellm/config.yaml" "router_settings:"
+  assert_contains "${HOME_DIR}/.litellm/config.yaml" "model_group_alias:"
+  assert_contains "${HOME_DIR}/.litellm/config.yaml" "claude-sonnet-4-5:"
+  assert_contains "${HOME_DIR}/.litellm/config.yaml" "hidden: true"
+  assert_contains "${HOME_DIR}/.litellm/config.yaml" "enable_pre_call_checks: true"
+  MK="$(master_key_from)"
+  if [ -n "$MK" ] && [ "$MK" = "$(litellm_docker_run)" ]; then a_ok "master key consistent"; else a_bad "master key mismatch"; fi
+  assert_mode "${HOME_DIR}/.litellm/master_key.txt" 600
+  assert_file_exists "${HOME_DIR}/.free-ai-agents/provider_keys.env"
+  assert_mode "${HOME_DIR}/.free-ai-agents/provider_keys.env" 600
+  assert_contains "${HOME_DIR}/.free-ai-agents/provider_keys.env" "GROQ_API_KEY=${GROQ_KEY}"
+  assert_mirrors "${FAKE_ROOT}/etc/docker/daemon.json"
   assert_file_exists "${FAKE_ROOT}/usr/local/bin/freeagents"
-  assert_file_exists "${FAKE_ROOT}/usr/local/bin/litellm-boot.sh"
-  if grep -qF "command = /usr/local/bin/litellm-boot.sh" "${FAKE_ROOT}/etc/wsl.conf" 2>/dev/null \
-     || [ -f "${FAKE_ROOT}/etc/systemd/system/litellm.service" ]; then
-    a_ok "boot persistence configured (wsl.conf entry or systemd unit)"
-  else
-    a_bad "no boot persistence found (neither wsl.conf entry nor systemd unit)"
-  fi
-  assert_daemon_json_mirrors "${FAKE_ROOT}/etc/docker/daemon.json"
-  if [ -f /etc/docker/daemon.json ]; then
-    assert_contains "$CURRENT_LOG" "Existing daemon.json backed up"
-  else
-    assert_not_contains "$CURRENT_LOG" "backed up"
-  fi
-  assert_file_exists "/mnt/c/Users/Test User/.claude/settings.json"
-  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "claude-gpt-oss-120b" "claude-gemini-2.0-flash"
-  assert_contains "$CURRENT_LOG" "Writing the LiteLLM profile into the Claude Desktop app..."
-  assert_contains "$CURRENT_LOG" "Desktop profile written (configLibrary)"
-  assert_contains "$CURRENT_LOG" "ALREADY CONFIGURED automatically"
+  assert_file_exists "${FAKE_ROOT}/usr/local/bin/freeagents-boot.sh"
+  assert_file_missing "${FAKE_ROOT}/usr/local/bin/omni"
+  assert_file_missing "${FAKE_ROOT}/usr/local/bin/litellm"
+  assert_file_missing "${FAKE_ROOT}/usr/local/bin/litellm-boot.sh"
+  assert_contains "${FAKE_ROOT}/etc/wsl.conf" "command = /usr/local/bin/freeagents-boot.sh"
+  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "http://127.0.0.1:4000"
   dprof="/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a119e.json"
   assert_file_exists "$dprof"
-  assert_file_missing "${leglib}/litellm-free-ai-agents.json"
-  assert_contains "$CURRENT_LOG" "Removed an outdated desktop profile (old id)."
-  if python3 -c "
-import json,sys
-d=json.load(open('$dprof'))
-assert d['inferenceGatewayBaseUrl']=='http://127.0.0.1:4000', d
-assert d['inferenceProvider']=='gateway'
-assert d['inferenceGatewayApiKey']==sys.argv[1]
-names=[e['name'] for e in d['inferenceModels']]
-assert names==['claude-sonnet-4-5','claude-haiku-4-5'], names
-labels=[e['labelOverride'] for e in d['inferenceModels']]
-assert labels[0]=='FreeAgents/LiteLLM gpt-oss-120b', labels
-assert labels[1] in ('FreeAgents/LiteLLM gpt-oss-20b','FreeAgents/LiteLLM gemini-2.0-flash','FreeAgents/LiteLLM deepseek-chat-v3-0324'), labels
-" "$MK" 2>/dev/null; then a_ok "Desktop profile valid (catalog ids + FreeAgents/LiteLLM labels)"; else a_bad "Desktop profile JSON invalid"; fi
-  if python3 -c "
-import json
-m=json.load(open('/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/_meta.json'))
-assert any(e.get('id')=='00000000-0000-4000-8000-0000000a119e' and e.get('name')=='Free Agents' for e in m['entries']), m
-assert not any(e.get('id')=='litellm-free-ai-agents' for e in m['entries']), m
-assert m['appliedId']=='00000000-0000-4000-8000-0000000a110e', m
-" 2>/dev/null; then a_ok "_meta: new entry added, legacy purged, applied pick NOT stolen"; else a_bad "_meta.json merge wrong"; fi
-  assert_contains "${HOME_DIR}/.litellm/config.yaml" "model_name: claude-sonnet-4-5"
-  assert_contains "${HOME_DIR}/.litellm/config.yaml" "model_name: claude-haiku-4-5"
-  assert_contains "${HOME_DIR}/.litellm/config.yaml" "model: groq/openai/gpt-oss-120b"
+  assert_json "$dprof" "d['inferenceGatewayBaseUrl'] == 'http://127.0.0.1:4000' and d['modelDiscoveryEnabled'] is True" "desktop profile (LiteLLM) wired"
+  assert_json "$dprof" "d['inferenceModels'][0]['labelOverride'] == 'FreeAgents/LiteLLM'" "desktop label FreeAgents/LiteLLM"
+  assert_json "/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/_meta.json" "any(e.get('id') == '00000000-0000-4000-8000-0000000a119e' for e in d['entries'])" "_meta entry added"
+  assert_not_contains "$CURRENT_LOG" "OmniRoute-OpenCode"
   dump_state
   finish_test
 else
@@ -434,21 +428,19 @@ else
 fi
 
 #===============================================================================
-# T02 - install with ONLY the Groq key
+# T02 - LiteLLM install with a single provider (Groq only)
 #===============================================================================
-start_test "T02_install_groq_only"
+start_test "T02_litellm_groq_only"
 if [ "$MNT_OK" -eq 1 ]; then
   fresh_env
-  printf '1\n\n\ngsk_only_groq_0123456789ab\n\n\n\n\n' | run_script
+  printf '1\n1\n\n%s\n\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
   T_RC=$?
   assert_rc 0
-  assert_contains "$CURRENT_LOG" "Collected 1 API key(s)"
-  assert_models "${HOME_DIR}/.litellm/config.yaml" "$GROQ2_MODELS"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e GROQ_API_KEY=gsk_only_groq_0123456789ab"
+  assert_models "${HOME_DIR}/.litellm/config.yaml" 2
+  assert_contains "$CURRENT_LOG" "Collected 1 provider key(s)"
+  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e GROQ_API_KEY=${GROQ_KEY}"
   assert_not_contains "${T_WORKSTATE}/docker-calls.log" "OPENROUTER_API_KEY"
   assert_not_contains "${T_WORKSTATE}/docker-calls.log" "GEMINI_API_KEY"
-  MK="$(master_key_from)"
-  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "claude-gpt-oss-120b" "claude-gpt-oss-20b"
   dump_state
   finish_test
 else
@@ -456,17 +448,53 @@ else
 fi
 
 #===============================================================================
-# T03 - install with ONLY the Google AI key (default model selection)
+# T03 - OmniRoute install (official npm package, managed REST setup)
 #===============================================================================
-start_test "T03_install_gemini_only"
+start_test "T03_omniroute_install_npm"
 if [ "$MNT_OK" -eq 1 ]; then
   fresh_env
-  printf '1\n\n\n\n\nAIzaOnlyTest0123456789ab\n\n\n' | run_script
+  printf '1\n2\n\n%s\n\n\n%s\n\n\n\n0\n' "$GROQ_KEY" "$CEREBRAS_KEY" | run_script
   T_RC=$?
   assert_rc 0
-  assert_models "${HOME_DIR}/.litellm/config.yaml" "$GEMINI1_MODELS"
-  MK="$(master_key_from)"
-  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "claude-gemini-2.0-flash" "claude-gemini-2.0-flash"
+  assert_contains "${T_WORKSTATE}/node-calls.log" "node -v"
+  assert_contains "${T_WORKSTATE}/npm-calls.log" "install -g omniroute"
+  assert_contains "${T_WORKSTATE}/omniroute-calls.log" "omniroute serve"
+  assert_file_exists "${HOME_DIR}/.free-ai-agents/omniroute.pid"
+  assert_contains "$CURRENT_LOG" "OmniRoute is healthy"
+  assert_file_exists "${HOME_DIR}/.omniroute/.env"
+  assert_mode "${HOME_DIR}/.omniroute/.env" 600
+  assert_env_line "${HOME_DIR}/.omniroute/.env" "PORT" "$MOCK_PORT"
+  assert_env_line "${HOME_DIR}/.omniroute/.env" "DATA_DIR" "${HOME_DIR}/.omniroute"
+  assert_env_line "${HOME_DIR}/.omniroute/.env" "REQUIRE_API_KEY" "true"
+  assert_not_contains "${HOME_DIR}/.omniroute/.env" "EXPOSE_CC_DISCOVERY_ALIASES"
+  assert_not_contains "${HOME_DIR}/.omniroute/.env" "OMNIROUTE_MEMORY_MB"
+  if python3 - "${HOME_DIR}/.omniroute/.env" <<'PY' 2>/dev/null
+import sys
+vals = {}
+for line in open(sys.argv[1], encoding="utf-8"):
+    if "=" in line and not line.startswith("#"):
+        k, v = line.rstrip("\n").split("=", 1)
+        vals[k] = v
+assert len(vals.get("JWT_SECRET", "")) >= 32, vals.get("JWT_SECRET")
+assert len(vals.get("API_KEY_SECRET", "")) >= 16, vals.get("API_KEY_SECRET")
+assert len(vals.get("INITIAL_PASSWORD", "")) >= 8
+PY
+  then a_ok "OmniRoute secrets satisfy the startup minimums"; else a_bad "OmniRoute secrets too short"; fi
+  assert_mock 'assert len(state["connections"]) == 2, state["connections"]' "two provider connections registered"
+  assert_mock 'assert [c["provider"] for c in state["connections"]] == ["groq", "cerebras"]' "connections use the OmniRoute provider ids"
+  assert_mock 'assert len(state["keys"]) == 1 and state["keys"][0]["name"] == "freeagents-claude"' "one managed client key"
+  assert_mock 'assert len(state["combos"]) == 1 and state["combos"][0]["name"] == "claude-freeagents"' "one branded combo"
+  assert_mock 'assert state["combos"][0]["strategy"] == "auto"' "combo strategy auto"
+  assert_mock 'assert all(m["model"] for m in state["combos"][0]["models"]) and len(state["combos"][0]["models"]) >= 2' "combo models built from the live catalog"
+  assert_contains "$CURRENT_LOG" "Anthropic endpoint /v1/messages answered 200"
+  assert_not_contains "$CURRENT_LOG" "OmniRoute-OpenCode"
+  assert_contains "${CURRENT_LOG}" "npm install -g omniroute"
+  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$(tr -d '\n' < "${HOME_DIR}/.free-ai-agents/omniroute_claude.key")" "http://127.0.0.1:${MOCK_PORT}"
+  dprof="/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a110e.json"
+  assert_file_exists "$dprof"
+  assert_json "$dprof" "d['inferenceModels'][0]['labelOverride'] == 'FreeAgents/Omni'" "desktop label FreeAgents/Omni"
+  assert_json "$dprof" "d['inferenceGatewayBaseUrl'] == 'http://127.0.0.1:${MOCK_PORT}'" "desktop profile points at OmniRoute"
+  assert_file_missing "/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a119e.json"
   dump_state
   finish_test
 else
@@ -474,19 +502,25 @@ else
 fi
 
 #===============================================================================
-# T04 - zero keys on first round -> forced retry -> success on second round
+# T04 - both gateways in a single run (previous default behavior)
 #===============================================================================
-start_test "T04_no_keys_retry_then_success"
+start_test "T04_both_gateways_single_run"
 if [ "$MNT_OK" -eq 1 ]; then
   fresh_env
-  printf '1\n\n\n\n\n\n\n\n\nsk_or_second_0123456789ab\n\n\n\n' | run_script
+  printf '1\n3\n\n%s\n%s\n\n\n\n\n0\n' "$GROQ_KEY" "$MISTRAL_KEY" | run_script
   T_RC=$?
   assert_rc 0
-  assert_contains "$CURRENT_LOG" "At least ONE API key is required. Let's try again."
-  assert_contains "$CURRENT_LOG" "Collected 1 API key(s)"
-  assert_models "${HOME_DIR}/.litellm/config.yaml" "$OR2_MODELS"
+  assert_contains "${T_WORKSTATE}/docker-calls.log" "run -d --name litellm"
+  assert_contains "${T_WORKSTATE}/npm-calls.log" "install -g omniroute"
+  assert_file_exists "${HOME_DIR}/.litellm/config.yaml"
+  assert_file_exists "${HOME_DIR}/.omniroute/.env"
   MK="$(master_key_from)"
-  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "claude-deepseek-v3.1" "claude-deepseek-v3.1"
+  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "http://127.0.0.1:4000"
+  assert_file_exists "/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a119e.json"
+  assert_file_exists "/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a110e.json"
+  assert_mock 'assert len(state["combos"]) == 1 and len(state["connections"]) == 2' "OmniRoute configured next to LiteLLM"
+  assert_contains "${CURRENT_LOG}" "LiteLLM engine ready"
+  assert_contains "${CURRENT_LOG}" "OmniRoute engine ready"
   dump_state
   finish_test
 else
@@ -494,36 +528,51 @@ else
 fi
 
 #===============================================================================
-# T05 - zero keys on all 3 attempts -> script must exit non-zero
+# T05 - non-interactive commands (install / status / doctor)
 #===============================================================================
-start_test "T05_no_keys_three_attempts_fails"
+start_test "T05_cli_commands"
 fresh_env
-printf '1\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n' | run_script
+env HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" \
+  FAKE_ROOT="$FAKE_ROOT" MOCK_OMNI_PORT="$MOCK_PORT" OMNIROUTE_PORT="$MOCK_PORT" \
+  HEALTH_CODE="$T_HEALTH_CODE" KEYCHECK_CODE="$T_KEYCHECK_CODE" \
+  FREEAGENTS_BOOT_MODE=wslconf LITELLM_HEALTH_WAIT_SEC=2 OMNIROUTE_HEALTH_WAIT_SEC=4 \
+  FREEAGENTS_SKIP_WINDOWS=1 \
+  bash "$SCRIPT_FILE" install both < /dev/null >> "$CURRENT_LOG" 2>&1
 T_RC=$?
-assert_rc 1
-assert_contains "$CURRENT_LOG" "Exiting after 3 attempts"
+if [ "$T_RC" = "1" ]; then a_ok "install aborts without keys (exit 1)"; else a_bad "expected exit 1 without keys, got $T_RC"; fi
+assert_contains "$CURRENT_LOG" "At least ONE API key is required"
 dump_state
 finish_test
 
 #===============================================================================
-# T06 - reinstall over an existing container replaces it
+# T06 - command surface: both gateways, no per-gateway up/down commands
 #===============================================================================
-start_test "T06_reinstall_replaces_container"
+start_test "T06_command_surface"
 if [ "$MNT_OK" -eq 1 ]; then
   fresh_env
-  printf '1\n\n\ngsk_first_0123456789abcdef\n\n\n\n\n' | run_script
-  # second run: answer 'n' -> replace all keys
-  printf '1\n\n\nn\ngsk_second_0123456789abcdef\n\n\n\n\n' | run_script
+  printf '1\n3\n\n%s\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
   T_RC=$?
   assert_rc 0
-  assert_contains "$CURRENT_LOG" "Existing API keys found (from the previous install)"
-  assert_contains "$CURRENT_LOG" "OK - enter the replacement keys below."
-  assert_contains "$CURRENT_LOG" "Found existing container 'litellm'. Removing it..."
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "rm -f litellm"
-  if [ "$(grep -cx 'litellm' "${T_WORKSTATE}/containers.txt")" = "1" ]; then a_ok "exactly one container registered"; else a_bad "container registry not deduplicated"; fi
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e GROQ_API_KEY=gsk_second_0123456789abcdef"
-  MK="$(master_key_from)"
-  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "claude-gpt-oss-120b" "claude-gpt-oss-20b"
+  cli="${FAKE_ROOT}/usr/local/bin/freeagents"
+  assert_file_exists "$cli"
+  assert_contains "$cli" "freeagents up|down|restart"
+  assert_contains "$cli" "start/stop/restart BOTH gateways"
+  assert_contains "$cli" "doctor [engine]"
+  assert_contains "$cli" "uninstall"
+  assert_file_missing "${FAKE_ROOT}/usr/local/bin/omni"
+  assert_contains "$SCRIPT_FILE" "Unknown command:"
+  # run the CLI for real: status must report both engines
+  env HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" \
+    FAKE_ROOT="$FAKE_ROOT" MOCK_OMNI_PORT="$MOCK_PORT" OMNIROUTE_PORT="$MOCK_PORT" \
+    HEALTH_CODE="$T_HEALTH_CODE" FREEAGENTS_SKIP_WINDOWS=1 \
+    bash "$cli" status >> "$CURRENT_LOG" 2>&1
+  assert_contains "$CURRENT_LOG" "=== LITELLM (port 4000) ==="
+  assert_contains "$CURRENT_LOG" "=== OMNIROUTE (port ${MOCK_PORT}) ==="
+  env HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" \
+    FAKE_ROOT="$FAKE_ROOT" MOCK_OMNI_PORT="$MOCK_PORT" OMNIROUTE_PORT="$MOCK_PORT" \
+    HEALTH_CODE="$T_HEALTH_CODE" FREEAGENTS_SKIP_WINDOWS=1 \
+    bash "$cli" help >> "$CURRENT_LOG" 2>&1
+  assert_contains "$CURRENT_LOG" "credentials          dashboard URLs, logins and Claude tokens"
   dump_state
   finish_test
 else
@@ -531,28 +580,176 @@ else
 fi
 
 #===============================================================================
-# T07 - full uninstall removes container + linux folder + windows config
+# T07 - menu: invalid input is handled, 0 exits cleanly
 #===============================================================================
-start_test "T07_full_uninstall"
+start_test "T07_menu_behavior"
+fresh_env
+printf 'x\n99\n0\n' | run_script
+T_RC=$?
+assert_rc 0
+assert_contains "$CURRENT_LOG" "Install"
+assert_contains "$CURRENT_LOG" "Doctor"
+assert_contains "$CURRENT_LOG" "Config Manager"
+assert_contains "$CURRENT_LOG" "Invalid choice: 'x'"
+assert_contains "$CURRENT_LOG" "Invalid choice: '99'"
+dump_state
+finish_test
+
+#===============================================================================
+# T08 - profile switch: active gateway decides the Claude wiring
+#===============================================================================
+start_test "T08_profile_switch"
 if [ "$MNT_OK" -eq 1 ]; then
   fresh_env
-  printf '1\n\n\ngsk_uninstall_0123456789ab\n\n\n\n\n' | run_script
-  printf '6\n' | run_script
+  printf '1\n3\n\n%s\n%s\n\n\n\n\n9\n5\n0\n0\n' "$GROQ_KEY" "$GEMINI_KEY" | run_script
+  T_RC=$?
+  assert_rc 0
+  assert_contains "$CURRENT_LOG" "Active gateway for Claude: omniroute"
+  OMNI_TOKEN="$(tr -d '\n' < "${HOME_DIR}/.free-ai-agents/omniroute_claude.key")"
+  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$OMNI_TOKEN" "http://127.0.0.1:${MOCK_PORT}"
+  assert_json "/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/_meta.json" \
+    "d['appliedId'] == '00000000-0000-4000-8000-0000000a110e'" "desktop app switched to the Omni profile"
+  # switching back must restore the LiteLLM wiring
+  printf '9\n5\n0\n0\n' | run_script
+  assert_contains "$CURRENT_LOG" "Active gateway for Claude: litellm"
+  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$(master_key_from)" "http://127.0.0.1:4000"
+  dump_state
+  finish_test
+else
+  skip_test "requires writable /mnt/c"
+fi
+
+#===============================================================================
+# T09 - Windows proxy: ON (both engines), kept across re-runs, then OFF
+#===============================================================================
+start_test "T09_windows_proxy"
+if [ "$MNT_OK" -eq 1 ]; then
+  fresh_env
+  T_PROXY_CALL_CODE="200"
+  printf '1\n3\ny\n172.20.144.1:7890\n\n%s\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
+  T_RC=$?
+  assert_rc 0
+  assert_file_exists "${HOME_DIR}/.free-ai-agents/windows_proxy.txt"
+  assert_contains "${HOME_DIR}/.free-ai-agents/windows_proxy.txt" "172.20.144.1:7890"
+  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e HTTP_PROXY=http://172.20.144.1:7890"
+  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e HTTPS_PROXY=http://172.20.144.1:7890"
+  assert_env_line "${HOME_DIR}/.omniroute/.env" "HTTP_PROXY" "http://172.20.144.1:7890"
+  assert_env_line "${HOME_DIR}/.omniroute/.env" "HTTPS_PROXY" "http://172.20.144.1:7890"
+  assert_env_line "${HOME_DIR}/.omniroute/.env" "NO_PROXY" "localhost,127.0.0.1,::1"
+  # turning it OFF must strip it from both engines
+  printf '9\n2\n0\n0\n' | run_script
+  assert_file_missing "${HOME_DIR}/.free-ai-agents/windows_proxy.txt"
+  assert_not_contains "${HOME_DIR}/.omniroute/.env" "HTTP_PROXY"
+  dump_state
+  finish_test
+else
+  skip_test "requires writable /mnt/c"
+fi
+
+#===============================================================================
+# T10 - re-entering keys keeps the proxy and applies to BOTH gateways
+#===============================================================================
+start_test "T10_rekey_keeps_proxy"
+if [ "$MNT_OK" -eq 1 ]; then
+  fresh_env
+  T_PROXY_CALL_CODE="200"
+  printf '1\n3\ny\n172.20.144.1:7890\n\n%s\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
+  T_RC=$?
+  assert_rc 0
+  printf '9\n3\n\n\n%s\n\n%s\n\n0\n' "$GEMINI_KEY" "$MISTRAL_KEY" | run_script
+  T_RC=$?
+  assert_rc 0
+  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e GEMINI_API_KEY=${GEMINI_KEY}"
+  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e MISTRAL_API_KEY=${MISTRAL_KEY}"
+  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e HTTP_PROXY=http://172.20.144.1:7890"
+  assert_contains "${HOME_DIR}/.free-ai-agents/windows_proxy.txt" "172.20.144.1:7890"
+  assert_mock 'assert sorted(c["provider"] for c in state["connections"]) == ["gemini", "mistral"], state["connections"]' "OmniRoute connections replaced"
+  assert_mock 'assert len(state["combos"]) == 1' "single combo kept after rekey"
+  dump_state
+  finish_test
+else
+  skip_test "requires writable /mnt/c"
+fi
+
+#===============================================================================
+# T11 - UPDATE: re-download from this repo, keys and proxy kept
+#===============================================================================
+start_test "T11_update_flow"
+if [ "$MNT_OK" -eq 1 ]; then
+  fresh_env
+  cp "$SCRIPT_FILE" "${T_WORK}/self.sh"
+  T_SELF_UPDATE="${T_WORK}/self.sh"
+  printf '1\n3\n\n%s\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
+  T_RC=$?
+  assert_rc 0
+  printf '4\ny\n\n0\n' | run_script
+  T_RC=$?
+  assert_rc 0
+  assert_contains "$CURRENT_LOG" "UPDATE: downloading the latest script from im-JvD/FreeAI-Agents"
+  assert_contains "${T_WORKSTATE}/curl-calls.log" "raw.githubusercontent.com/im-JvD/FreeAI-Agents/main/setup.sh"
+  assert_contains "$CURRENT_LOG" "Keeping the existing 1 provider key(s)"
+  assert_contains "$CURRENT_LOG" "INSTALLATION COMPLETED SUCCESSFULLY"
+  dump_state
+  finish_test
+else
+  skip_test "requires writable /mnt/c"
+fi
+
+#===============================================================================
+# T12 - self-heal: a broken manager copy is re-downloaded by the CLI
+#===============================================================================
+start_test "T12_cli_self_heal"
+if [ "$MNT_OK" -eq 1 ]; then
+  fresh_env
+  cp "$SCRIPT_FILE" "${T_WORK}/self.sh"
+  T_SELF_UPDATE="${T_WORK}/self.sh"
+  printf '1\n1\n\n%s\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
+  T_RC=$?
+  assert_rc 0
+  printf 'GARBAGE-NOT-BASH\n' > "${HOME_DIR}/.free-ai-agents/setup.sh"
+  env HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" \
+    FAKE_ROOT="$FAKE_ROOT" FAKE_SELF_SOURCE="$T_SELF_UPDATE" MOCK_OMNI_PORT="$MOCK_PORT" OMNIROUTE_PORT="$MOCK_PORT" \
+    HEALTH_CODE="$T_HEALTH_CODE" FREEAGENTS_SKIP_WINDOWS=1 \
+    bash "${FAKE_ROOT}/usr/local/bin/freeagents" status >> "$CURRENT_LOG" 2>&1
+  T_RC=$?
+  assert_rc 0
+  assert_contains "$CURRENT_LOG" "Fetching the Free AI Agents manager"
+  assert_contains "$CURRENT_LOG" "=== LITELLM (port 4000) ==="
+  if cmp -s "$SCRIPT_FILE" "${HOME_DIR}/.free-ai-agents/setup.sh"; then a_ok "manager copy restored"; else a_bad "manager copy not restored"; fi
+  dump_state
+  finish_test
+else
+  skip_test "requires writable /mnt/c"
+fi
+
+#===============================================================================
+# T13 - UNINSTALL removes everything the installer created
+#===============================================================================
+start_test "T13_uninstall"
+if [ "$MNT_OK" -eq 1 ]; then
+  fresh_env
+  printf '1\n3\n\n%s\n%s\n\n\n\n\n0\n' "$GROQ_KEY" "$GEMINI_KEY" | run_script
+  T_RC=$?
+  assert_rc 0
+  settings="/mnt/c/Users/Test User/.claude/settings.json"
+  assert_file_exists "$settings"
+  printf '6\ny\n0\n' | run_script
   T_RC=$?
   assert_rc 0
   assert_contains "$CURRENT_LOG" "UNINSTALL COMPLETED SUCCESSFULLY"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "stop litellm"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "rm litellm"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "rm litellm-db"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "network rm litellm-net"
-  if [ ! -s "${T_WORKSTATE}/containers.txt" ]; then a_ok "container registry empty"; else a_bad "container still registered"; fi
-  assert_file_missing "${HOME_DIR}/.litellm/config.yaml"
-  assert_file_missing "${HOME_DIR}/.litellm/master_key.txt"
-  assert_file_missing "${HOME_DIR}/.litellm/dashboard_credentials.txt"
-  assert_file_missing "/mnt/c/Users/Test User/.claude/settings.json"
+  if grep -qxF "litellm" "${T_WORKSTATE}/containers.txt" 2>/dev/null; then a_bad "litellm container still registered"; else a_ok "litellm container removed"; fi
+  if grep -qxF "litellm-db" "${T_WORKSTATE}/containers.txt" 2>/dev/null; then a_bad "litellm-db container still registered"; else a_ok "litellm-db container removed"; fi
+  assert_file_missing "${HOME_DIR}/.litellm"
+  assert_file_missing "${HOME_DIR}/.omniroute"
+  assert_file_missing "${HOME_DIR}/.free-ai-agents"
   assert_file_missing "${FAKE_ROOT}/usr/local/bin/freeagents"
-  assert_file_missing "${FAKE_ROOT}/usr/local/bin/litellm-boot.sh"
-  assert_not_contains "${FAKE_ROOT}/etc/wsl.conf" "litellm-boot.sh"
+  assert_file_missing "${FAKE_ROOT}/usr/local/bin/freeagents-boot.sh"
+  assert_not_contains "${FAKE_ROOT}/etc/wsl.conf" "command = /usr/local/bin/freeagents-boot.sh"
+  assert_not_contains "$settings" "ANTHROPIC_BASE_URL"
+  assert_contains "${T_WORKSTATE}/npm-calls.log" "uninstall -g omniroute"
+  assert_json "$settings" "'env' not in d or 'ANTHROPIC_MODEL' not in d['env']" "Claude Code settings cleaned"
+  dprof="/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a119e.json"
+  assert_file_missing "$dprof"
   dump_state
   finish_test
 else
@@ -560,61 +757,87 @@ else
 fi
 
 #===============================================================================
-# T08 - uninstall when nothing is installed (idempotent, must not fail)
+# T14 - non-interactive 'install' + 'uninstall --yes' (scripted use)
 #===============================================================================
-start_test "T08_uninstall_idempotent"
+start_test "T14_scripted_install_keys_file"
 fresh_env
-printf '6\n' | run_script
+# pre-seed the key file: the installer must offer to keep it without prompting
+mkdir -p "${HOME_DIR}/.free-ai-agents"
+printf 'GROQ_API_KEY=%s\n' "$GROQ_KEY" > "${HOME_DIR}/.free-ai-agents/provider_keys.env"
+chmod 600 "${HOME_DIR}/.free-ai-agents/provider_keys.env"
+printf '\n\n' | env HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" \
+  FAKE_ROOT="$FAKE_ROOT" MOCK_OMNI_PORT="$MOCK_PORT" OMNIROUTE_PORT="$MOCK_PORT" \
+  HEALTH_CODE="$T_HEALTH_CODE" KEYCHECK_CODE="$T_KEYCHECK_CODE" \
+  FREEAGENTS_BOOT_MODE=wslconf LITELLM_HEALTH_WAIT_SEC=2 OMNIROUTE_HEALTH_WAIT_SEC=4 \
+  FREEAGENTS_SKIP_WINDOWS=1 \
+  bash "$SCRIPT_FILE" install litellm >> "$CURRENT_LOG" 2>&1
 T_RC=$?
 assert_rc 0
-assert_contains "$CURRENT_LOG" "No container named 'litellm' found"
-assert_contains "$CURRENT_LOG" "UNINSTALL COMPLETED SUCCESSFULLY"
+assert_contains "$CURRENT_LOG" "Existing provider keys found"
+assert_contains "$CURRENT_LOG" "Keeping the existing 1 provider key(s)"
+assert_models "${HOME_DIR}/.litellm/config.yaml" 2
+assert_contains "${T_WORKSTATE}/docker-calls.log" "-e GROQ_API_KEY=${GROQ_KEY}"
 dump_state
 finish_test
 
 #===============================================================================
-# T09 - invalid menu choice exits with code 1
+# T15 - no Windows integration: the install still succeeds and warns
 #===============================================================================
-start_test "T09_invalid_menu_choice"
+start_test "T15_no_windows_integration"
 fresh_env
-printf '9\n0\n' | run_script
+T_SKIP_WINDOWS="1"
+printf '1\n3\n\n%s\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
 T_RC=$?
 assert_rc 0
-assert_contains "$CURRENT_LOG" "Invalid choice: '9'. Pick 0-8."
-assert_contains "$CURRENT_LOG" "Bye!"
+assert_contains "$CURRENT_LOG" "Windows integration disabled on purpose"
+assert_file_missing "/mnt/c/Users/Test User/.claude/settings.json"
+assert_file_exists "${HOME_DIR}/.litellm/config.yaml"
+assert_mock 'assert len(state["combos"]) == 1' "OmniRoute still configured headless"
 dump_state
 finish_test
 
 #===============================================================================
-# T10 - quit option exits cleanly
+# T16 - key verification: rejected keys are reported and can be re-entered
 #===============================================================================
-start_test "T10_menu_quit"
+start_test "T16_key_verification"
 fresh_env
-printf 'q\n' | run_script
+T_KEYCHECK_CODE="401"
+printf '1\n1\n\n%s\nn\nn\n%s\n\n\n\n\n0\n' "$GROQ_KEY" "$GROQ_KEY" | run_script
 T_RC=$?
 assert_rc 0
-assert_contains "$CURRENT_LOG" "Bye!"
+assert_contains "$CURRENT_LOG" "REJECTED (HTTP 401)"
+assert_contains "$CURRENT_LOG" "Re-enter the rejected keys now?"
 dump_state
 finish_test
 
 #===============================================================================
-# T11 - Windows username containing a space
+# T17 - re-install is idempotent: secrets, keys and the combo stay stable
 #===============================================================================
-start_test "T11_username_with_space"
+start_test "T17_idempotent_reinstall"
 if [ "$MNT_OK" -eq 1 ]; then
   fresh_env
-  printf '1\n\n\ngsk_spaceuser_0123456789ab\n\n\n\n\n' | \
-    env -u DOCKER_PULL_FAIL -u DOCKER_APT_FAIL -u HEALTH_CODE \
-      HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" \
-      STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" \
-      HEALTH_CODE="200" PS_USERNAME="Ali Rezaei" \
-      bash "$SCRIPT_FILE" >> "$CURRENT_LOG" 2>&1
+  printf '1\n3\n\n%s\n%s\n\n\n\n\n0\n' "$GROQ_KEY" "$CEREBRAS_KEY" | run_script
   T_RC=$?
   assert_rc 0
-  assert_contains "$CURRENT_LOG" "/mnt/c/Users/Ali Rezaei"
-  assert_file_exists "/mnt/c/Users/Ali Rezaei/.claude/settings.json"
-  MK="$(master_key_from)"
-  assert_claude_settings "/mnt/c/Users/Ali Rezaei/.claude/settings.json" "$MK" "claude-gpt-oss-120b" "claude-gpt-oss-20b"
+  MK1="$(master_key_from)"
+  SECRET1="$(awk -F= '/^API_KEY_SECRET=/{print $2}' "${HOME_DIR}/.omniroute/.env")"
+  OMNIKEY1="$(tr -d '\n' < "${HOME_DIR}/.free-ai-agents/omniroute_claude.key")"
+  printf '\n\n' | env HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" \
+    FAKE_ROOT="$FAKE_ROOT" MOCK_OMNI_PORT="$MOCK_PORT" OMNIROUTE_PORT="$MOCK_PORT" \
+    HEALTH_CODE="$T_HEALTH_CODE" KEYCHECK_CODE="$T_KEYCHECK_CODE" \
+    FREEAGENTS_BOOT_MODE=wslconf LITELLM_HEALTH_WAIT_SEC=2 OMNIROUTE_HEALTH_WAIT_SEC=4 \
+    FREEAGENTS_SKIP_WINDOWS=1 \
+    bash "$SCRIPT_FILE" install both >> "$CURRENT_LOG" 2>&1
+  T_RC=$?
+  assert_rc 0
+  if [ "$MK1" = "$(master_key_from)" ]; then a_ok "master key reused"; else a_bad "master key rotated"; fi
+  SECRET2="$(awk -F= '/^API_KEY_SECRET=/{print $2}' "${HOME_DIR}/.omniroute/.env")"
+  if [ -n "$SECRET1" ] && [ "$SECRET1" = "$SECRET2" ]; then a_ok "OmniRoute secrets reused"; else a_bad "OmniRoute secrets rotated"; fi
+  OMNIKEY2="$(tr -d '\n' < "${HOME_DIR}/.free-ai-agents/omniroute_claude.key")"
+  if [ -n "$OMNIKEY1" ] && [ "$OMNIKEY1" = "$OMNIKEY2" ]; then a_ok "client API key reused"; else a_bad "client API key rotated"; fi
+  assert_mock 'assert len(state["connections"]) == 2 and len(state["keys"]) == 1 and len(state["combos"]) == 1' "no duplicates created"
+  assert_contains "$CURRENT_LOG" "Reusing the stored managed API key"
+  assert_contains "$CURRENT_LOG" "Routing combo 'claude-freeagents' updated"
   dump_state
   finish_test
 else
@@ -622,697 +845,116 @@ else
 fi
 
 #===============================================================================
-# T12 - existing daemon.json is backed up before being replaced
+# T18 - OmniRoute login failure: install continues, manual setup is explained
 #===============================================================================
-start_test "T12_daemon_json_backup"
-if [ "$CAN_MANAGE_DAEMON" -eq 1 ]; then
-  fresh_env
-  REAL_DAEMON_BACKUP="${T_WORK}/host-daemon.json.orig"
-  if [ -f /etc/docker/daemon.json ]; then
-    REAL_DAEMON_STATE="was-present"
-    cp /etc/docker/daemon.json "$REAL_DAEMON_BACKUP"
+start_test "T18_omniroute_login_failure"
+fresh_env
+T_SKIP_WINDOWS="1"
+T_REJECT_LOGIN="1"
+printf '1\n2\n\n%s\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
+T_RC=$?
+assert_rc 0
+assert_contains "$CURRENT_LOG" "Dashboard login failed (HTTP 401)"
+assert_contains "$CURRENT_LOG" "must be added manually in the dashboard"
+assert_file_exists "${HOME_DIR}/.omniroute/.env"
+assert_mock 'assert len(state["combos"]) == 0' "no combo created without a session"
+dump_state
+finish_test
+
+#===============================================================================
+# T19 - provider registry sanity (read straight from the script)
+#===============================================================================
+start_test "T19_provider_registry"
+fresh_env
+lib="$(script_lib)"
+if env HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" FAKE_ROOT="$FAKE_ROOT" T_WORKSTATE="$T_WORKSTATE" \
+   bash -c "source '$lib' >/dev/null 2>&1; all_provider_ids | tr '\n' ' '" > "${T_WORK}/ids.txt" 2>>"$CURRENT_LOG"; then
+  got="$(cat "${T_WORK}/ids.txt")"
+  if [ "$got" = "groq openrouter gemini cerebras mistral github sambanova nvidia_nim together_ai " ]; then
+    a_ok "provider registry complete"
   else
-    REAL_DAEMON_STATE="seeded-absent"
+    a_bad "unexpected provider ids: $got"
   fi
-  as_root mkdir -p /etc/docker 2>/dev/null || true
-  printf '{\n  "user-custom-key": "keep-me"\n}\n' | as_root tee /etc/docker/daemon.json >/dev/null
-  # re-mirror the seeded host file into the virtual root (fresh_env ran before seeding)
-  mkdir -p "${FAKE_ROOT}/etc/docker"
-  cp /etc/docker/daemon.json "${FAKE_ROOT}/etc/docker/daemon.json"
-  printf '1\n\n\ngsk_backup_0123456789abcdef\n\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Existing daemon.json backed up"
-  bak_count="$(find "${FAKE_ROOT}/etc/docker" -name 'daemon.json.bak.*' 2>/dev/null | wc -l)"
-  if [ "${bak_count:-0}" -ge 1 ]; then a_ok "backup file created in virtual /etc/docker"; else a_bad "no daemon.json.bak.* created"; fi
-  assert_daemon_json_mirrors "${FAKE_ROOT}/etc/docker/daemon.json"
-  dump_state
-  # restore host state BEFORE finish_test (which deletes $T_WORK)
-  if [ "$REAL_DAEMON_STATE" = "was-present" ]; then
-    cp_sudo "$REAL_DAEMON_BACKUP" /etc/docker/daemon.json
-  else
-    rm_f_sudo /etc/docker/daemon.json
-  fi
-  REAL_DAEMON_STATE=""
-  finish_test
 else
-  skip_test "requires root/sudo to manage /etc/docker/daemon.json"
+  a_bad "could not load the script library"
 fi
+assert_contains "$SCRIPT_FILE" "PROVIDER_SPECS=("
+assert_contains "$SCRIPT_FILE" "openrouter/deepseek/deepseek-chat-v3.1:free"
+assert_contains "$SCRIPT_FILE" "github/gpt-4o-mini"
+if [ "$(grep -c '"[a-z_]*|' "$SCRIPT_FILE" | head -1)" -ge 1 ]; then a_ok "spec table present"; else a_bad "spec table missing"; fi
+dump_state
+finish_test
 
 #===============================================================================
-# T13 - powershell.exe found via /mnt/c fallback (no PATH interop)
+# T20 - docker: mirror backup, pull retry and registry-fallback behavior
 #===============================================================================
-start_test "T13_powershell_fallback_path"
-if [ "$MNT_OK" -eq 1 ] && [ "$CAN_MANAGE_DAEMON" -eq 1 ]; then
-  fresh_env
-  FALLBACK_BIN="${T_WORK}/bin-without-ps"
-  mkdir -p "$FALLBACK_BIN"
-  for f in sudo apt-get service systemctl curl docker.installer; do
-    cp "$STUBBIN/$f" "$FALLBACK_BIN/${f%.installer}"
-  done
-  chmod +x "$FALLBACK_BIN"/*
-  PS_MNT="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-  as_root mkdir -p "/mnt/c/Windows/System32/WindowsPowerShell/v1.0" 2>/dev/null || true
-  CREATED_PS=0
-  if [ ! -f "$PS_MNT" ]; then
-    as_root cp "$STUBBIN/powershell.exe" "$PS_MNT" && as_root chmod 755 "$PS_MNT" && CREATED_PS=1
-  fi
-  if [ -x "$PS_MNT" ]; then
-    printf '1\n\n\ngsk_fallback_0123456789abc\n\n\n\n\n' | \
-      env -u DOCKER_PULL_FAIL -u DOCKER_APT_FAIL -u HEALTH_CODE -u PS_USERNAME \
-        HOME="$HOME_DIR" PATH="${FALLBACK_BIN}:${PATH}" \
-        STUBBIN="$FALLBACK_BIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" \
-        HEALTH_CODE="200" \
-        bash "$SCRIPT_FILE" >> "$CURRENT_LOG" 2>&1
-    T_RC=$?
-    assert_rc 0
-    assert_contains "$CURRENT_LOG" "/mnt/c/Users/Test User"
-    assert_file_exists "/mnt/c/Users/Test User/.claude/settings.json"
-    if [ "$CREATED_PS" -eq 1 ]; then rm_f_sudo "$PS_MNT"; fi
-  else
-    a_bad "could not stage powershell.exe under /mnt/c"
-  fi
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c + sudo"
-fi
+start_test "T20_docker_resilience"
+fresh_env
+mkdir -p "${FAKE_ROOT}/etc/docker"
+printf '{"registry-mirrors":["https://old.example"]}\n' > "${FAKE_ROOT}/etc/docker/daemon.json"
+T_PULL_RETRIES="2"
+printf '1\n1\n\n%s\n\n\n\n\n\n\n0\n' "$GROQ_KEY" | env DOCKER_PULL_FAIL=1 PATH="${STUBBIN}:${PATH}" HOME="$HOME_DIR" \
+  STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" MOCK_OMNI_PORT="$MOCK_PORT" \
+  OMNIROUTE_PORT="$MOCK_PORT" HEALTH_CODE="$T_HEALTH_CODE" KEYCHECK_CODE="$T_KEYCHECK_CODE" \
+  FREEAGENTS_BOOT_MODE="$T_BOOT_MODE" LITELLM_UI_DB="$T_UI_DB" LITELLM_PULL_RETRIES="$T_PULL_RETRIES" \
+  LITELLM_HEALTH_WAIT_SEC="$T_HEALTH_WAIT_SEC" FREEAGENTS_SKIP_WINDOWS="$T_SKIP_WINDOWS" \
+  bash "$SCRIPT_FILE" install litellm >> "$CURRENT_LOG" 2>&1
+T_RC=$?
+if [ "$T_RC" != "0" ]; then a_ok "install fails cleanly when the image cannot be pulled"; else a_bad "expected a failure when every pull fails"; fi
+assert_contains "$CURRENT_LOG" "Image pull failed after 2 attempt(s)"
+assert_contains "$CURRENT_LOG" "Existing daemon.json backed up"
+assert_mirrors "${FAKE_ROOT}/etc/docker/daemon.json"
+assert_not_contains "$CURRENT_LOG" "OmniRoute-OpenCode"
+dump_state
+finish_test
 
 #===============================================================================
-# T14 - health check timeout path (server never becomes healthy)
+# T21 - OmniRoute with an existing short secret: regenerated, not fatal
 #===============================================================================
-start_test "T14_health_check_timeout"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  T_HEALTH_CODE="000"
-  T_HEALTH_WAIT_SEC="4"
-  printf '1\n\n\ngsk_timeout_0123456789abcd\n\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Health check timed out"
-  assert_contains "$CURRENT_LOG" "INSTALLATION COMPLETED SUCCESSFULLY"
-  T_HEALTH_CODE=""
-  T_HEALTH_WAIT_SEC=""
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
+start_test "T21_omniroute_weak_secret_recovery"
+fresh_env
+mkdir -p "${HOME_DIR}/.omniroute"
+printf 'JWT_SECRET=short\nAPI_KEY_SECRET=x\nINITIAL_PASSWORD=pw\nPORT=1\n' > "${HOME_DIR}/.omniroute/.env"
+printf '1\n2\n\n%s\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
+T_RC=$?
+assert_rc 0
+assert_contains "$CURRENT_LOG" "A stored OmniRoute secret was too short and has been regenerated"
+if python3 - "${HOME_DIR}/.omniroute/.env" <<'PY' 2>/dev/null
+import sys
+vals = dict(l.rstrip("\n").split("=", 1) for l in open(sys.argv[1]) if "=" in l and not l.startswith("#"))
+assert len(vals["JWT_SECRET"]) >= 32 and len(vals["API_KEY_SECRET"]) >= 16
+PY
+then a_ok "weak secrets replaced with strong ones"; else a_bad "weak secrets survived"; fi
+assert_mock 'assert len(state["combos"]) == 1' "OmniRoute fully configured after the fix"
+dump_state
+finish_test
 
 #===============================================================================
-# T15 - docker pull failure -> script must die with a clear error
+# T22 - Docker-less host: OmniRoute-only install must not touch docker
 #===============================================================================
-start_test "T15_pull_failure"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  printf '1\n\n\ngsk_pullfail_0123456789abc\n\n\n\n\n' | \
-    env -u DOCKER_APT_FAIL -u HEALTH_CODE -u PS_USERNAME \
-      DOCKER_PULL_FAIL="1" LITELLM_PULL_RETRIES="1" \
-      HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" \
-      STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" \
-      HEALTH_CODE="200" \
-      bash "$SCRIPT_FILE" >> "$CURRENT_LOG" 2>&1
-  T_RC=$?
-  assert_rc 1
-  assert_contains "$CURRENT_LOG" "Image pull failed"
-  assert_file_missing "/mnt/c/Users/Test User/.claude/settings.json"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T16 - docker already installed -> apt-get must be skipped
-#===============================================================================
-start_test "T16_docker_already_installed"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  cp "$STUBBIN/docker.installer" "${STUBBIN}/docker"
-  chmod +x "${STUBBIN}/docker"
-  printf '1\n\n\ngsk_predocker_0123456789ab\n\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Docker binary already present, skipping apt installation"
-  if [ ! -s "${T_WORKSTATE}/apt-calls.log" ]; then a_ok "apt-get never called"; else a_bad "apt-get was called unexpectedly"; fi
-  rm -f "${STUBBIN}/docker"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T17 - CRLF self-heal: a Windows-line-endings copy must still work end-to-end
-#===============================================================================
-start_test "T17_crlf_self_heal"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  CRLF_COPY="${T_WORK}/LiteLLM.crlf.sh"
-  sed 's/$/\r/' "$SCRIPT_FILE" > "$CRLF_COPY"
-  printf '1\n\n\ngsk_crlf_0123456789abcdef\n\n\n\n\n' | run_script "$CRLF_COPY"
-  T_RC=$?
-  assert_rc 0
-  assert_not_contains "$CURRENT_LOG" "invalid option name"
-  assert_contains "$CURRENT_LOG" "INSTALLATION COMPLETED SUCCESSFULLY"
-  MK="$(master_key_from)"
-  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "claude-gpt-oss-120b" "claude-gpt-oss-20b"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T18 - systemd branch: litellm.service unit created and enabled
-#===============================================================================
-start_test "T18_autostart_systemd_unit"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  T_BOOT_MODE="systemd"
-  printf '1\n\n\ngsk_systemd_0123456789abc\n\n\n\n\n' | run_script
-  T_RC=$?
-  T_BOOT_MODE=""
-  assert_rc 0
-  UNIT="${FAKE_ROOT}/etc/systemd/system/litellm.service"
-  assert_file_exists "$UNIT"
-  assert_contains "$UNIT" "ExecStart=/usr/local/bin/litellm-boot.sh"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "systemctl enable litellm.service"
-  assert_contains "$CURRENT_LOG" "systemd service: litellm.service (enabled)"
-  if [ -f "${FAKE_ROOT}/etc/wsl.conf" ]; then
-    assert_not_contains "${FAKE_ROOT}/etc/wsl.conf" "litellm-boot.sh"
-  fi
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T19 - management CLI: up / down / restart / status / uninstall
-#===============================================================================
-start_test "T19_management_cli"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  printf '1\n\n\ngsk_cli_0123456789abcdef\n\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  CLI="${FAKE_ROOT}/usr/local/bin/freeagents"
-  if [ -x "$CLI" ]; then a_ok "CLI installed and executable"; else a_bad "CLI missing or not executable"; fi
-  run_cli() {
-    env -u DOCKER_PULL_FAIL -u DOCKER_APT_FAIL -u HEALTH_CODE -u PS_USERNAME \
-      HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" \
-      STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" \
-      HEALTH_CODE="200" PS_USERNAME="Test User" \
-      bash "$CLI" "$@" >> "$CURRENT_LOG" 2>&1
-  }
-  run_cli status
-  assert_contains "$CURRENT_LOG" "Container state : running"
-  assert_contains "$CURRENT_LOG" "Restart policy  : unless-stopped"
-  assert_contains "$CURRENT_LOG" "Admin panel     : http://127.0.0.1:4000/ui"
-  run_cli down
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "stop litellm"
-  if grep -qxF "litellm" "${T_WORKSTATE}/container-running.txt"; then a_bad "container still marked running after down"; else a_ok "running state cleared after down"; fi
-  run_cli up
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "start litellm"
-  run_cli restart
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "restart litellm"
-  MK="$(master_key_from)"
-  run_cli credentials
-  assert_contains "$CURRENT_LOG" "Username : admin"
-  assert_contains "$CURRENT_LOG" "Password : ${MK}"
-  run_cli uninstall --yes
-  assert_contains "$CURRENT_LOG" "UNINSTALL COMPLETED."
-  assert_contains "$CURRENT_LOG" "Removed the legacy Claude Desktop registry policy"
-  if [ ! -s "${T_WORKSTATE}/containers.txt" ]; then a_ok "container registry empty after CLI uninstall"; else a_bad "container still registered after CLI uninstall"; fi
-  assert_file_missing "${HOME_DIR}/.litellm/config.yaml"
-  assert_file_missing "/mnt/c/Users/Test User/.claude/settings.json"
-  assert_file_missing "$CLI"
-  assert_file_missing "${FAKE_ROOT}/usr/local/bin/litellm-boot.sh"
-  assert_not_contains "${FAKE_ROOT}/etc/wsl.conf" "litellm-boot.sh"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T20 - wsl.conf boot-command branch (forced via LITELLM_BOOT_MODE=wslconf)
-#===============================================================================
-start_test "T20_autostart_wslconf_boot"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  T_BOOT_MODE="wslconf"
-  printf '1\n\n\ngsk_wslconf_0123456789abc\n\n\n\n\n' | run_script
-  T_RC=$?
-  T_BOOT_MODE=""
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Boot command added to /etc/wsl.conf"
-  assert_contains "${FAKE_ROOT}/etc/wsl.conf" "command = /usr/local/bin/litellm-boot.sh"
-  assert_file_missing "${FAKE_ROOT}/etc/systemd/system/litellm.service"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T21 - pull fails but a local image exists -> continue with the local copy
-#===============================================================================
-start_test "T21_pull_failure_with_local_image"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  echo "ghcr.io/berriai/litellm:main-latest" > "${T_WORKSTATE}/images.txt"
-  printf '1\n\n\ngsk_localimg_0123456789abc\n\n\n\n\n' | \
-    env -u DOCKER_APT_FAIL -u HEALTH_CODE -u PS_USERNAME \
-      DOCKER_PULL_FAIL="1" LITELLM_PULL_RETRIES="1" \
-      HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" \
-      STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" \
-      HEALTH_CODE="200" \
-      bash "$SCRIPT_FILE" >> "$CURRENT_LOG" 2>&1
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Image already exists locally"
-  assert_contains "$CURRENT_LOG" "continuing with the local copy"
-  assert_contains "$CURRENT_LOG" "INSTALLATION COMPLETED SUCCESSFULLY"
-  assert_file_exists "/mnt/c/Users/Test User/.claude/settings.json"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T22 - ghcr fallback mirror is used when the direct pull fails
-#===============================================================================
-start_test "T22_ghcr_mirror_fallback"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  printf '1\n\n\ngsk_mirror_0123456789abcd\n\n\n\n\n' | \
-    env -u DOCKER_APT_FAIL -u HEALTH_CODE -u PS_USERNAME \
-      DOCKER_PULL_FAIL_MATCH="ghcr.io" LITELLM_PULL_RETRIES="1" \
-      LITELLM_GHCR_MIRROR="ghcr.nju.edu.cn/" \
-      HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" \
-      STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" \
-      HEALTH_CODE="200" \
-      bash "$SCRIPT_FILE" >> "$CURRENT_LOG" 2>&1
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Trying the ghcr fallback mirror"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "pull ghcr.nju.edu.cn/berriai/litellm:main-latest"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "tag ghcr.nju.edu.cn/berriai/litellm:main-latest ghcr.io/berriai/litellm:main-latest"
-  assert_contains "$CURRENT_LOG" "INSTALLATION COMPLETED SUCCESSFULLY"
-  MK="$(master_key_from)"
-  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "claude-gpt-oss-120b" "claude-gpt-oss-20b"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T23 - reinstall keeps existing keys by default (Enter = keep)
-#===============================================================================
-start_test "T23_reinstall_keeps_existing_keys"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  printf '1\n\n\ngsk_keepme_0123456789abc\n\n\n\n\n' | run_script
-  # second run: only the menu answer -> default keeps existing keys
-  printf '1\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Database container 'litellm-db' already present."
-  assert_contains "$CURRENT_LOG" "Existing API keys found (from the previous install)"
-  assert_contains "$CURRENT_LOG" "Groq       : gsk_****9abc"
-  assert_contains "$CURRENT_LOG" "Keeping the existing 1 API key(s)."
-  assert_not_contains "$CURRENT_LOG" "Groq API key"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "-e GROQ_API_KEY=gsk_keepme_0123456789abc"
-  MK1="$(grep -o 'LITELLM_MASTER_KEY=[^ ]*' "${T_WORKSTATE}/docker-calls.log" | head -1 | cut -d= -f2)"
-  MK2="$(grep -o 'LITELLM_MASTER_KEY=[^ ]*' "${T_WORKSTATE}/docker-calls.log" | tail -1 | cut -d= -f2)"
-  if [ -n "$MK1" ] && [ "$MK1" = "$MK2" ]; then a_ok "master key stable across reinstall"; else a_bad "master key changed on reinstall"; fi
-  MK="$(master_key_from)"
-  assert_claude_settings "/mnt/c/Users/Test User/.claude/settings.json" "$MK" "claude-gpt-oss-120b" "claude-gpt-oss-20b"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T24 - LITELLM_UI_DB=0: no database stack, config without database_url
-#===============================================================================
-start_test "T24_ui_db_disabled"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  T_UI_DB="0"
-  printf '1\n\n\ngsk_nodb_0123456789abcd\n\n\n\n\n' | run_script
-  T_RC=$?
-  T_UI_DB=""
-  assert_rc 0
-  assert_not_contains "${T_WORKSTATE}/docker-calls.log" "litellm-db"
-  assert_not_contains "${T_WORKSTATE}/docker-calls.log" "DATABASE_URL"
-  assert_not_contains "${HOME_DIR}/.litellm/config.yaml" "database_url"
-  assert_not_contains "${T_WORKSTATE}/docker-calls.log" "--network litellm-net"
-  assert_contains "$CURRENT_LOG" "Admin UI database               : disabled"
-  assert_file_exists "/mnt/c/Users/Test User/.claude/settings.json"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T26 - live key verification: rejected keys are flagged and re-entry offered
-#===============================================================================
-start_test "T26_key_verification_rejects_bad_keys"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  T_KEYCHECK_CODE="403"
-  printf '1\n\n\ngsk_prefix_ok_but_rejected\n\n\n\n\nn\n' | run_script
-  T_RC=$?
-  T_KEYCHECK_CODE=""
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Verifying API keys against the providers"
-  assert_contains "$CURRENT_LOG" "Groq: REJECTED (HTTP 403)"
-  assert_contains "$CURRENT_LOG" "Re-enter the rejected keys now?"
-  assert_contains "$CURRENT_LOG" "INSTALLATION COMPLETED SUCCESSFULLY"
-  # all-valid default flow must NOT show the re-entry prompt
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T27 - verification passes by default (no re-entry prompt on normal flows)
-#===============================================================================
-start_test "T27_key_verification_all_valid"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  printf '1\n\n\ngsk_valid_flow_0123456789\n\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Groq: valid (HTTP 200)"
-  assert_not_contains "$CURRENT_LOG" "Re-enter the rejected keys now?"
-  assert_not_contains "$CURRENT_LOG" "REJECTED"
-  assert_contains "$CURRENT_LOG" "INSTALLATION COMPLETED SUCCESSFULLY"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T28 - litellm doctor: stack + provider + live per-model test output
-#===============================================================================
-start_test "T28_doctor_command"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  printf '1\n\n\ngsk_doctor_0123456789abcd\n\n\n\n\n' | run_script
-  CLI="${FAKE_ROOT}/usr/local/bin/freeagents"
-  if [ -x "$CLI" ]; then
-    env -u DOCKER_PULL_FAIL -u DOCKER_APT_FAIL -u HEALTH_CODE -u PS_USERNAME \
-      HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" \
-      STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" \
-      HEALTH_CODE="200" KEYCHECK_CODE="200" PS_USERNAME="Test User" \
-      bash "$CLI" doctor >> "$CURRENT_LOG" 2>&1
-    T_RC=$?
-    assert_rc 0
-    assert_contains "$CURRENT_LOG" "[STACK]"
-    assert_contains "$CURRENT_LOG" "[PROVIDER CONNECTIVITY + KEYS]"
-    assert_contains "$CURRENT_LOG" "Groq: reachable, key valid (HTTP 200)"
-    assert_contains "$CURRENT_LOG" "OpenRouter: no key configured"
-    assert_contains "$CURRENT_LOG" "[MODEL LIVE TESTS]"
-    assert_contains "$CURRENT_LOG" "OK   claude-gpt-oss-120b"
-    assert_contains "$CURRENT_LOG" "OK   claude-gpt-oss-20b"
-    assert_contains "$CURRENT_LOG" "ALL 2 MODEL TESTS PASSED"
-  else
-    a_bad "CLI missing for doctor test"
-  fi
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T29 - Windows proxy: enabled with default address, kept on reinstall
-#===============================================================================
-start_test "T29_windows_proxy_enabled"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  GW="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"
-  printf '1\n\ny\n\ngsk_winproxy_0123456789\n\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Route provider traffic through your Windows proxy?"
-  assert_contains "$CURRENT_LOG" "Proxy reachable - test call through it returned HTTP 200"
-  assert_contains "$CURRENT_LOG" "Windows proxy enabled: http://${GW}:7890"
-  assert_file_exists "${HOME_DIR}/.litellm/windows_proxy.txt"
-  assert_contains "${HOME_DIR}/.litellm/windows_proxy.txt" "http://${GW}:7890"
-  assert_contains "$CURRENT_LOG" "Windows proxy routing           : http://${GW}:7890"
-  # container env carries the proxy (and NO_PROXY keeps local traffic direct)
-  assert_contains "$T_WORKSTATE/docker-calls.log" "-e HTTP_PROXY=http://${GW}:7890"
-  assert_contains "$T_WORKSTATE/docker-calls.log" "-e HTTPS_PROXY=http://${GW}:7890"
-  assert_contains "$T_WORKSTATE/docker-calls.log" "-e NO_PROXY=localhost,127.0.0.1,litellm-db"
-  # reinstall (keep keys + keep proxy): proxy must survive
-  printf '1\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Windows proxy kept: http://${GW}:7890"
-  assert_contains "$T_WORKSTATE/docker-calls.log" "-e HTTP_PROXY=http://${GW}:7890"
-  assert_file_exists "/mnt/c/Users/Test User/.claude/settings.json"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T30 - Windows proxy: replace flow, default-off, and file persistence
-#===============================================================================
-start_test "T30_windows_proxy_replace_and_off"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  mkdir -p "${HOME_DIR}/.litellm"
-  printf 'http://10.10.10.10:7890\n' > "${HOME_DIR}/.litellm/windows_proxy.txt"
-  # install: previous proxy setting found -> kept by default
-  printf '1\n\n\ngsk_t30_first_012345678\n\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Windows proxy kept: http://10.10.10.10:7890"
-  assert_contains "$T_WORKSTATE/docker-calls.log" "-e HTTP_PROXY=http://10.10.10.10:7890"
-  # reinstall: answer 'n' -> enter a NEW address (accepted by the stub test call)
-  printf '1\n\nn\n127.0.0.1:9999\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Windows proxy enabled: http://127.0.0.1:9999"
-  assert_contains "${HOME_DIR}/.litellm/windows_proxy.txt" "http://127.0.0.1:9999"
-  assert_contains "$T_WORKSTATE/docker-calls.log" "-e HTTP_PROXY=http://127.0.0.1:9999"
-  # a fresh install that answers the proxy prompt with ENTER stays direct
-  fresh_env
-  printf '1\n\n\ngsk_t30_off_0123456789a\n\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Windows proxy: disabled (direct connections)"
-  assert_file_missing "${HOME_DIR}/.litellm/windows_proxy.txt"
-  if grep -q "HTTP_PROXY" "$T_WORKSTATE/docker-calls.log"; then
-    a_bad "proxy env vars present but proxy was disabled"
-  else
-    a_ok "no proxy env vars when disabled"
-  fi
-  # failing proxy test call with a 127.x address -> dedicated hint, not saved
-  fresh_env
-  T_PROXY_CALL_CODE="000"
-  printf '1\n\ny\n127.0.0.1:10808\nn\ngsk_failpath_012345678\n\n\n\n\n' | run_script
-  T_RC=$?
-  T_PROXY_CALL_CODE=""
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Test call through the proxy FAILED (code 000)"
-  assert_contains "$CURRENT_LOG" "127.0.0.1 inside WSL is the WSL VM itself, NOT Windows"
-  assert_contains "$CURRENT_LOG" "Save it anyway?"
-  assert_contains "$CURRENT_LOG" "Windows proxy: disabled"
-  assert_file_missing "${HOME_DIR}/.litellm/windows_proxy.txt"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T31 - Claude Desktop app: auto policy by default, LITELLM_DESKTOP_CONFIG=0 skip
-#===============================================================================
-start_test "T31_desktop_policy_auto_config"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  printf '1\n\n\ngsk_desktop_0123456789ab\n\n\n\n\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Desktop profile written (configLibrary)"
-  assert_contains "$CURRENT_LOG" "ALREADY CONFIGURED automatically"
-  assert_file_exists "/mnt/c/Users/Test User/AppData/Local/Claude-3p/configLibrary/00000000-0000-4000-8000-0000000a119e.json"
-  grep -q "LocalApplicationData" "$T_WORKSTATE/powershell-calls.log" 2>/dev/null \
-    && a_ok "LOCALAPPDATA detection intact" || a_bad "LocalApplicationData never queried"
-  # disabled via knob: no registry writes at all
-  : > "${T_WORKSTATE}/powershell-calls.log"
-  fresh_env
-  printf '1\n\n\ngsk_desktop_off_01234567\n\n\n\n\n' | \
-  env -u DOCKER_PULL_FAIL -u DOCKER_APT_FAIL \
-    HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" \
-    STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" \
-    HEALTH_CODE="200" KEYCHECK_CODE="200" PS_USERNAME="Test User" \
-    LITELLM_DESKTOP_CONFIG="0" \
-    LITELLM_BOOT_MODE="${T_BOOT_MODE:-auto}" LITELLM_PULL_RETRIES="3" \
-    LITELLM_UI_DB="1" \
-    bash "$SCRIPT_FILE" >> "$CURRENT_LOG" 2>&1
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Claude Desktop auto-config disabled"
-  assert_contains "$CURRENT_LOG" "NOT auto-configured (LITELLM_DESKTOP_CONFIG=0)"
-  if grep -q "New-ItemProperty" "$T_WORKSTATE/powershell-calls.log" 2>/dev/null; then
-    a_bad "registry write happened despite LITELLM_DESKTOP_CONFIG=0"
-  else
-    a_ok "no registry writes when disabled"
-  fi
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T32 - unified menu: banner, config manager navigation, update-cancel, exit
-#===============================================================================
-start_test "T32_menu_and_config_manager"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  printf '8\n0\n4\nn\n0\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Free AI Agents"
-  assert_contains "$CURRENT_LOG" "BOT Version [ 3.0.0 ]"
-  assert_contains "$CURRENT_LOG" "Config Manager"
-  assert_contains "$CURRENT_LOG" "CONFIG MANAGER"
-  assert_contains "$CURRENT_LOG" "Gateway proxy ON"
-  assert_contains "$CURRENT_LOG" "Re-enter provider tokens (applied to BOTH engines)"
-  assert_contains "$CURRENT_LOG" "Re-apply Claude configs"
-  assert_contains "$CURRENT_LOG" "Switch the ACTIVE desktop profile"
-  assert_contains "$CURRENT_LOG" "Update cancelled."
-  assert_contains "$CURRENT_LOG" "Bye!"
-  fresh_env
-  printf 'x\n0\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Invalid choice: 'x'. Pick 0-8."
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T33 - Both engines: tokens & proxy asked ONCE, shared with the second engine
-#===============================================================================
-start_test "T33_both_engines_single_prompt"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  # fake secondary installer: records args + provider/proxy env for assertions
-  cat > "${T_WORKSTATE}/fake-omni.sh" <<'FAKEOMNI'
-#!/usr/bin/env bash
-echo "fake-omni-stdout $*"
-echo "fake-omni $*" >> "${T_WORKSTATE}/omni-calls.log"
-env | grep -E '^OMNIRoute_(GROQ|OPENROUTER|GEMINI|CEREBRAS|MISTRAL)_KEY=' | sort >> "${T_WORKSTATE}/omni-env.log"
-env | grep -E '^OMNIRoute_(USE_PROXY|PROXY_URL|FORCE_NO_TTY)=' | sort >> "${T_WORKSTATE}/omni-env.log"
-exit 0
-FAKEOMNI
-  T_FAKE_OMNI="${T_WORKSTATE}/fake-omni.sh"
-  # menu 1 -> engine 3 (both) -> proxy ENTER (off) -> groq key + 4 skips
-  printf '1\n3\n\ngsk_both_0123456789abcd\n\n\n\n\n\n' | run_script
-  T_RC=$?
-  T_FAKE_OMNI=""
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "INSTALLATION COMPLETED SUCCESSFULLY"
-  assert_contains "$CURRENT_LOG" "SECONDARY GATEWAY REPORT"
-  assert_contains "$CURRENT_LOG" "Provider tokens handed over"
-  assert_contains "$CURRENT_LOG" "SECONDARY ENGINE: installing with the SAME keys & proxy"
-  # exactly ONE keys-setup block for the whole run
-  keys_blocks="$(grep -c "API keys setup" "$CURRENT_LOG" || true)"
-  if [ "$keys_blocks" -eq 1 ]; then a_ok "keys asked exactly ONCE"; else a_bad "keys asked ${keys_blocks} time(s)"; fi
-  # the same groq token reached the second engine via env + seeded file
-  assert_contains "${T_WORKSTATE}/omni-env.log" "OMNIRoute_GROQ_KEY=gsk_both_0123456789abcd"
-  assert_contains "${T_WORKSTATE}/omni-env.log" "OMNIRoute_USE_PROXY=0"
-  assert_contains "${T_WORKSTATE}/omni-env.log" "OMNIRoute_FORCE_NO_TTY=1"
-  assert_contains "$CURRENT_LOG" "Watch live progress in a second terminal"
-  grep -q "GROQ_KEY=gsk_both_0123456789abcd" "${HOME_DIR}/omniroute-keys.env" \
-    && a_ok "secondary keys file seeded with the SAME token" || a_bad "secondary keys file missing token"
-  assert_contains "${T_WORKSTATE}/omni-calls.log" "fake-omni --install"
-  assert_file_exists "${HOME_DIR}/.free-ai-agents/setup.sh"
-  # --- menu operations with the secondary installed: SILENT delegation ---
-  printf '2\n5\n3\n0\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "Primary gateway is up"
-  assert_contains "$CURRENT_LOG" "Secondary gateway: restart - done"
-  assert_contains "$CURRENT_LOG" "Secondary gateway: stop - done"
-  assert_contains "$CURRENT_LOG" "status    : responding (HTTP 200)"
-  assert_not_contains "$CURRENT_LOG" "fake-omni-stdout"
-  assert_contains "${T_WORKSTATE}/omni-calls.log" "fake-omni --restart"
-  assert_contains "${T_WORKSTATE}/omni-calls.log" "fake-omni --down"
-  grep -q "fake-omni --status" "${T_WORKSTATE}/omni-calls.log" \
-    && a_bad "status must be a local probe (no delegation)" || a_ok "status is a local probe (no delegation)"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
-
-#===============================================================================
-# T34 - menu operations: Start/Restart, Status, Stop use the internal engine
-#===============================================================================
-start_test "T34_menu_operations"
-if [ "$MNT_OK" -eq 1 ]; then
-  fresh_env
-  printf '1\n\n\ngsk_menuops_012345678\n\n\n\n\n' | run_script
-  # menu 2 (start/restart) -> 5 (status) -> 3 (stop) -> 0 (exit)
-  printf '2\n5\n3\n0\n' | run_script
-  T_RC=$?
-  assert_rc 0
-  assert_contains "$CURRENT_LOG" "=== START / RESTART ==="
-  assert_contains "$CURRENT_LOG" "Primary gateway is up"
-  assert_contains "$CURRENT_LOG" "=== PRIMARY GATEWAY (port 4000) ==="
-  assert_contains "$CURRENT_LOG" "=== SECONDARY GATEWAY (port 20128) ==="
-  assert_contains "$CURRENT_LOG" "not installed"
-  assert_contains "$CURRENT_LOG" "=== STOP ==="
-  assert_contains "$CURRENT_LOG" "Primary gateway stopped."
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "restart litellm"
-  assert_contains "${T_WORKSTATE}/docker-calls.log" "stop litellm"
-  if grep -q "command not found" "$CURRENT_LOG"; then
-    a_bad "menu produced 'command not found'"
-  else
-    a_ok "no 'command not found' anywhere in menu operations"
-  fi
-  # installed CLI is the unified freeagents command
-  assert_file_exists "${FAKE_ROOT}/usr/local/bin/freeagents"
-  grep -q "run_secondary" "${FAKE_ROOT}/usr/local/bin/freeagents" \
-    && a_ok "freeagents CLI manages both gateways" || a_bad "freeagents CLI misses secondary handling"
-  grep -q 'MANAGER_COPY' "${FAKE_ROOT}/usr/local/bin/freeagents" \
-    && a_ok "bare freeagents re-opens the manager menu" || a_bad "bare freeagents has no menu re-open"
-  dump_state
-  finish_test
-else
-  skip_test "requires writable /mnt/c"
-fi
+start_test "T22_omniroute_only_needs_no_docker"
+fresh_env
+printf '1\n2\n\n%s\n\n\n\n\n\n0\n' "$GROQ_KEY" | run_script
+T_RC=$?
+assert_rc 0
+assert_not_contains "${T_WORKSTATE}/apt-calls.log" "install -y docker.io"
+assert_not_contains "${T_WORKSTATE}/docker-calls.log" "docker pull"
+assert_contains "$CURRENT_LOG" "npm install -g omniroute"
+assert_mock 'assert len(state["combos"]) == 1' "OmniRoute configured without Docker"
+dump_state
+finish_test
 
 #===============================================================================
 # Summary
 #===============================================================================
-echo >> "$SUMMARY_FILE"
-echo "TOTAL: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped" >> "$SUMMARY_FILE"
-
+TOTAL=$((PASS+FAIL+SKIP))
 echo
-msg "==============================================================="
-msg "RESULTS: ${PASS} passed / ${FAIL} failed / ${SKIP} skipped"
-msg "logs:    ${RESULTS_DIR}/"
-msg "summary: ${SUMMARY_FILE}"
-msg "==============================================================="
+msg "==================================================================="
+msg "TOTAL ${TOTAL} | PASS ${PASS} | FAIL ${FAIL} | SKIP ${SKIP}"
+msg "logs:   ${RESULTS_DIR}/"
+msg "summary ${SUMMARY_FILE}"
+msg "==================================================================="
+echo "TOTAL ${TOTAL} | PASS ${PASS} | FAIL ${FAIL} | SKIP ${SKIP}" >> "$SUMMARY_FILE"
 
-[ "$FAIL" -eq 0 ]
+if [ "$FAIL" -gt 0 ]; then exit 1; fi
+exit 0

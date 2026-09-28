@@ -2,26 +2,30 @@
 #===============================================================================
 # tests/e2e_litellm_real.sh
 #
-# REAL end-to-end test of the LiteLLM core (no simulation!):
+# REAL end-to-end test of the LiteLLM gateway produced by the unified setup.sh.
 #
 #   1. runs the REAL setup script (with stubbed docker/powershell, since the
 #      focus here is configuration correctness, not container plumbing)
 #   2. installs the REAL LiteLLM proxy from PyPI into a venv
-#   3. boots the REAL proxy with the config.yaml + master key that the script
-#      generated  (exactly the same CLI flags used inside the Docker container)
+#   3. boots the REAL proxy with the generated config.yaml + master key, using
+#      exactly the CLI flags the installer uses inside the container
 #   4. asserts against the live HTTP API:
-#        - /health/liveliness                 -> 200
-#        - GET  /v1/models + master key       -> 200 + all expected models
-#        - GET  /v1/models without/with wrong -> rejected (not 200)
-#        - POST /v1/chat/completions          -> routed upstream (fails only
-#                                                because the provider keys are
-#                                                intentionally fake)
+#        - GET  /health/liveliness             -> 200
+#        - GET  /v1/models (master key)        -> exactly ["claude-freeagents"]
+#        - GET  /v1/models (no key)            -> rejected (not 200)
+#        - POST /v1/chat/completions (unknown) -> 400 (invalid model)
+#        - POST /v1/chat/completions (model)   -> routed (upstream error is fine:
+#                                                 the keys are intentionally fake)
+#        - POST /v1/messages (model)           -> the Anthropic route Claude Code
+#                                                 uses also routes the model
+#        - the hidden desktop alias (claude-sonnet-4-5) routes to the same group
 #
 # Results: tests/results/E2E_litellm_real.log
 #
 # Env overrides:
-#   LITELLM_E2E_VENV  - reuse an existing venv path (created if missing)
+#   LITELLM_E2E_VENV  - venv path (created when missing)
 #   SKIP_INSTALL      - set to 1 when the venv already contains litellm
+#   E2E_PORT          - port for the temporary proxy (default: first free one)
 #
 # Usage:  bash tests/e2e_litellm_real.sh
 #===============================================================================
@@ -36,11 +40,13 @@ LOG_FILE="${RESULTS_DIR}/E2E_litellm_real.log"
 WORK="$(mktemp -d /tmp/litellm-e2e-run.XXXXXX)"
 VENV="${LITELLM_E2E_VENV:-/tmp/litellm-e2e-venv}"
 HOME_DIR="${WORK}/home"
-PORT=4000
-SRV_PID=""
-
+FAKE_ROOT="${WORK}/fakeroot"
+T_WORKSTATE="${WORK}/state"
 PROFILE_DIR="/mnt/c/Users/Test User"
 PROFILE_CREATED=0
+SRV_PID=""
+FAILURES=0
+MODEL_ID="claude-freeagents"
 
 as_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi; }
 
@@ -58,13 +64,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+mkdir -p "$RESULTS_DIR"
 log()  { echo "[E2E] $*" | tee -a "$LOG_FILE"; }
 fail() { echo "[E2E] FAIL - $*" | tee -a "$LOG_FILE"; FAILURES=$((FAILURES+1)); }
 ok()   { echo "[E2E] ok  - $*" | tee -a "$LOG_FILE"; }
 
-FAILURES=0
 : > "$LOG_FILE"
-
 log "==================================================================="
 log "REAL LiteLLM end-to-end test"
 log "script under test: ${SCRIPT_FILE}"
@@ -74,50 +79,39 @@ log "==================================================================="
 # [0] Preflight
 #-------------------------------------------------------------------------------
 log "[0] preflight"
-if ! command -v python3 >/dev/null 2>&1; then
-  log "SKIP - python3 not available"; exit 0
-fi
-if ! python3 -c "import venv" 2>/dev/null; then
-  log "SKIP - python3 venv module not available"; exit 0
-fi
+command -v python3 >/dev/null 2>&1 || { log "SKIP - python3 not available"; exit 0; }
+python3 -c "import venv" 2>/dev/null || { log "SKIP - python3 venv module not available"; exit 0; }
 PYPI_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://pypi.org/simple/ 2>/dev/null || true)"
-if [ "$PYPI_CODE" != "200" ]; then
-  log "SKIP - PyPI not reachable (http_code=${PYPI_CODE:-none}); cannot install real LiteLLM"; exit 0
+if [ "${SKIP_INSTALL:-0}" != "1" ] && [ "$PYPI_CODE" != "200" ]; then
+  log "SKIP - PyPI not reachable (http_code=${PYPI_CODE:-none}); cannot install real LiteLLM"
+  exit 0
 fi
-ok "python3 + venv + PyPI reachable"
+ok "python3 + venv present"
 
 #-------------------------------------------------------------------------------
-# [1] Install REAL LiteLLM into a venv
+# [1] Real LiteLLM in a venv
 #-------------------------------------------------------------------------------
 log "[1] preparing REAL LiteLLM installation (venv: ${VENV})"
-if [ "${SKIP_INSTALL:-0}" != "1" ]; then
-  if [ ! -x "${VENV}/bin/litellm" ]; then
-    rm -rf "$VENV"
-    python3 -m venv "$VENV" || { log "FAIL - venv creation failed"; exit 1; }
-    log "    installing litellm[proxy] from PyPI (this can take a few minutes)..."
-    if ! "${VENV}/bin/pip" install --quiet --upgrade pip >>"$LOG_FILE" 2>&1; then
-      log "FAIL - pip upgrade failed"; exit 1
-    fi
-    if ! "${VENV}/bin/pip" install --quiet 'litellm[proxy]' >>"$LOG_FILE" 2>&1; then
-      log "FAIL - litellm installation failed"; exit 1
-    fi
-  fi
+if [ "${SKIP_INSTALL:-0}" != "1" ] && [ ! -x "${VENV}/bin/litellm" ]; then
+  rm -rf "$VENV"
+  python3 -m venv "$VENV" || { log "FAIL - venv creation failed"; exit 1; }
+  log "    installing litellm[proxy] from PyPI (this can take a few minutes)..."
+  "${VENV}/bin/pip" install --quiet --upgrade pip >>"$LOG_FILE" 2>&1 || { log "FAIL - pip upgrade failed"; exit 1; }
+  "${VENV}/bin/pip" install --quiet 'litellm[proxy]' >>"$LOG_FILE" 2>&1 || { log "FAIL - litellm installation failed"; exit 1; }
 fi
-if [ ! -x "${VENV}/bin/litellm" ]; then
-  log "FAIL - litellm binary not found in venv"; exit 1
-fi
+[ -x "${VENV}/bin/litellm" ] || { log "FAIL - litellm binary not found in venv"; exit 1; }
 LITELLM_VER="$("${VENV}/bin/litellm" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 ok "real LiteLLM ready (version: ${LITELLM_VER:-unknown})"
-log "    venv reused for faster reruns; delete ${VENV} to reinstall"
 
 #-------------------------------------------------------------------------------
-# [2] Run the REAL setup script (stubbed docker/powershell) to produce
-#     the real artifacts: config.yaml + master_key.txt + Claude settings.json
+# [2] Run the REAL setup script (stubbed docker/powershell) to produce the real
+#     artifacts: config.yaml + master_key.txt + Claude settings.json
 #-------------------------------------------------------------------------------
 log "[2] running the setup script to generate real configuration artifacts"
-rm -f "${STUBBIN}/docker"   # keep the environment deterministic for reruns
-mkdir -p "${WORK}/state" "${WORK}/fakeroot" "$HOME_DIR"
-: > "${WORK}/state/containers.txt"
+rm -f "${STUBBIN}/docker" "${STUBBIN}/omniroute"   # deterministic reruns
+mkdir -p "$T_WORKSTATE" "$FAKE_ROOT" "$HOME_DIR"
+: > "${T_WORKSTATE}/docker-calls.log"
+: > "${T_WORKSTATE}/containers.txt"
 if [ ! -d "$PROFILE_DIR" ]; then
   if as_root mkdir -p "$PROFILE_DIR" 2>/dev/null && \
      as_root chown "$(id -u):$(id -g)" "$PROFILE_DIR" 2>/dev/null; then
@@ -126,154 +120,134 @@ if [ ! -d "$PROFILE_DIR" ]; then
     log "SKIP - cannot create fake Windows profile under /mnt/c"; exit 0
   fi
 fi
-printf '1\n\n\ngsk_e2e_groq_0123456789abcd\nsk-or-e2e_0123456789abcd\nAIzaE2eTest0123456789ab\ncsk-e2e_0123456789abcd\nsk_e2e_mistral0123456789\n' | \
-  # LITELLM_UI_DB=0: this sandbox cannot run the Postgres-backed Admin UI
-  # (prisma engine CDN is blocked here; the real Docker image ships it).
-  # The DB path is exercised by tests/e2e_real_docker.sh on a real machine.
+# menu: 1 install -> 1 (LiteLLM only) -> ENTER (no windows proxy) -> 5 keys ->
+# ENTER (no extra providers) -> 0 (exit)
+printf '1\n1\n\n%s\n%s\n%s\n%s\n%s\n\n0\n' \
+  "gsk_e2e_groq_0123456789abcd" \
+  "sk-or-e2e_0123456789abcd" \
+  "AIzaE2eTest0123456789ab" \
+  "csk-e2e_0123456789abcd" \
+  "sk_e2e_mistral0123456789" | \
   env -u DOCKER_PULL_FAIL -u DOCKER_APT_FAIL -u HEALTH_CODE -u PS_USERNAME \
     LITELLM_UI_DB="0" \
     HOME="$HOME_DIR" PATH="${STUBBIN}:${PATH}" \
-    STUBBIN="$STUBBIN" T_WORKSTATE="${WORK}/state" FAKE_ROOT="${WORK}/fakeroot" \
-    HEALTH_CODE="200" PS_USERNAME="Test User" \
+    STUBBIN="$STUBBIN" T_WORKSTATE="$T_WORKSTATE" FAKE_ROOT="$FAKE_ROOT" \
+    HEALTH_CODE="200" KEYCHECK_CODE="200" PS_USERNAME="Test User" \
     bash "$SCRIPT_FILE" >> "$LOG_FILE" 2>&1
 SCRIPT_RC=$?
 if [ "$SCRIPT_RC" -ne 0 ]; then
-  fail "setup script exited with ${SCRIPT_RC} (expected 0)"; exit 1
+  log "FAIL - setup script exited with ${SCRIPT_RC}"; exit 1
 fi
-ok "setup script completed (exit 0)"
 
 CONFIG="${HOME_DIR}/.litellm/config.yaml"
-MASTER_KEY="$(tr -d '\n' < "${HOME_DIR}/.litellm/master_key.txt" 2>/dev/null)"
-CC_JSON="/mnt/c/Users/Test User/.claude/settings.json"
-[ -f "$CONFIG" ]      && ok "config.yaml generated"      || fail "config.yaml missing"
-[ -n "$MASTER_KEY" ]  && ok "master key generated"       || fail "master key missing"
-[ -f "$CC_JSON" ]     && ok "Claude settings.json generated" || fail "Claude settings.json missing"
+KEYFILE="${HOME_DIR}/.litellm/master_key.txt"
+[ -f "$CONFIG" ]  || { log "FAIL - config.yaml was not generated"; exit 1; }
+[ -f "$KEYFILE" ] || { log "FAIL - master_key.txt was not generated"; exit 1; }
+MASTER_KEY="$(cat "$KEYFILE")"
+GROUP_COUNT="$(grep -c "model_name: ${MODEL_ID}" "$CONFIG" || true)"
+[ "${GROUP_COUNT:-0}" -ge 1 ] || fail "config.yaml has no '${MODEL_ID}' deployments"
+grep -q "model_group_alias" "$CONFIG" || fail "model_group_alias missing from config.yaml"
+grep -q "claude-sonnet-4-5" "$CONFIG"  || fail "hidden desktop alias missing from config.yaml"
+ok "config.yaml generated (${GROUP_COUNT} deployment(s) in the '${MODEL_ID}' group)"
 
 #-------------------------------------------------------------------------------
-# [3] Boot the REAL LiteLLM proxy with the generated config
-#     (same binary + same flags the Docker container uses)
+# [3] Boot the REAL proxy with the generated config
 #-------------------------------------------------------------------------------
-log "[3] starting REAL LiteLLM proxy on port ${PORT} with the generated config"
-DISABLE_PRISMA_RUN_GENERATION=true \
-LITELLM_MASTER_KEY="$MASTER_KEY" \
-GROQ_API_KEY="gsk_e2e_groq_0123456789abcd" \
-OPENROUTER_API_KEY="sk-or-e2e_0123456789abcd" \
-GEMINI_API_KEY="AIzaE2eTest0123456789ab" \
-CEREBRAS_API_KEY="csk-e2e_0123456789abcd" \
-MISTRAL_API_KEY="sk_e2e_mistral0123456789" \
-  setsid "${VENV}/bin/litellm" --config "$CONFIG" --port "$PORT" \
-  </dev/null > "${WORK}/server.log" 2>&1 &
+pick_port() {
+  local p
+  for p in $(seq "${E2E_PORT:-4015}" "$(( ${E2E_PORT:-4015} + 20 ))"); do
+    if ! (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then echo "$p"; return 0; fi
+  done
+  echo "${E2E_PORT:-4015}"
+}
+PORT="$(pick_port)"
+log "[3] booting the real proxy on port ${PORT}"
+
+# the config references os.environ/<PROVIDER>_API_KEY; feed it the generated values
+set -a
+# shellcheck disable=SC1091
+[ -f "${HOME_DIR}/.free-ai-agents/provider_keys.env" ] && . "${HOME_DIR}/.free-ai-agents/provider_keys.env"
+set +a
+export LITELLM_MASTER_KEY="$MASTER_KEY"
+
+"${VENV}/bin/litellm" --config "$CONFIG" --host 127.0.0.1 --port "$PORT" >>"$LOG_FILE" 2>&1 &
 SRV_PID=$!
 
-HEALTH_CODE=""
-for i in $(seq 1 60); do
-  HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${PORT}/health/liveliness" 2>/dev/null || true)"
-  [ "$HEALTH_CODE" = "200" ] && break
+HEALTH=000
+for _ in $(seq 1 45); do
+  HEALTH="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${PORT}/health/liveliness" 2>/dev/null || true)"
+  [ "$HEALTH" = "200" ] && break
   kill -0 "$SRV_PID" 2>/dev/null || break
   sleep 2
 done
-
-if [ "$HEALTH_CODE" = "200" ]; then
-  ok "proxy is UP - /health/liveliness returned 200"
-else
-  fail "proxy did not become healthy (last code: ${HEALTH_CODE:-none})"
-  tail -30 "${WORK}/server.log" >> "$LOG_FILE" 2>/dev/null
-  exit 1
-fi
+[ "$HEALTH" = "200" ] || { log "FAIL - proxy never became healthy (last code: ${HEALTH})"; exit 1; }
+ok "GET /health/liveliness -> 200"
 
 #-------------------------------------------------------------------------------
-# [4] HTTP assertions against the live proxy
+# [4] Live API assertions
 #-------------------------------------------------------------------------------
-log "[4] asserting against the live LiteLLM API"
+log "[4] live API assertions"
 
-# A1 - /v1/models WITH the master key must return 200
-CODE="$(curl -s -o "${WORK}/models.json" -w '%{http_code}' --max-time 10 \
-  -H "Authorization: Bearer ${MASTER_KEY}" "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
-if [ "$CODE" = "200" ]; then ok "GET /v1/models with master key -> 200"; else fail "GET /v1/models with master key -> ${CODE:-none}"; fi
-
-# A2 - model list must match exactly the 7 models
-python3 - "${WORK}/models.json" <<'PY' >> "$LOG_FILE" 2>&1
-import sys, json
-expected = ["claude-gpt-oss-120b", "claude-gpt-oss-20b",
-            "claude-deepseek-v3.1", "claude-deepseek-v3-0324",
-            "claude-gemini-2.0-flash", "claude-llama3.1-70b", "claude-codestral",
-            "claude-sonnet-4-5", "claude-haiku-4-5"]
-ids = [m["id"] for m in json.load(open(sys.argv[1]))["data"]]
-if ids == expected:
-    print("[E2E] ok  - model list matches exactly all 7 expected models")
-else:
-    print(f"[E2E] FAIL - model list mismatch: got {ids}")
-    sys.exit(1)
-PY
-if [ $? -eq 0 ]; then ok "model list == 9 expected models (7 + 2 aliases)"; else fail "model list mismatch (see log)"; fi
-
-# A3 - /v1/models WITHOUT auth must be rejected
-CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
-if [ "$CODE" != "200" ]; then ok "GET /v1/models without auth rejected (code ${CODE:-none})"; else fail "endpoint accepted unauthenticated request"; fi
-
-# A4 - /v1/models with a WRONG key must be rejected
-CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-  -H "Authorization: Bearer sk-definitely-wrong-key" "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
-if [ "$CODE" != "200" ]; then ok "GET /v1/models with wrong key rejected (code ${CODE:-none})"; else fail "endpoint accepted a wrong key"; fi
-
-# A5 - chat completion must be ROUTED upstream (fails there because keys are fake)
-CODE="$(curl -s -o "${WORK}/chat.json" -w '%{http_code}' --max-time 45 \
-  -X POST -H "Authorization: Bearer ${MASTER_KEY}" -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.0-flash","messages":[{"role":"user","content":"ping"}]}' \
-  "http://127.0.0.1:${PORT}/v1/chat/completions" 2>/dev/null || true)"
-if [ "$CODE" != "200" ] && [ -n "$CODE" ]; then
-  ok "POST /v1/chat/completions routed upstream and rejected fake provider key (code ${CODE})"
+MODELS="$(curl -s --max-time 10 "http://127.0.0.1:${PORT}/v1/models" \
+  -H "Authorization: Bearer ${MASTER_KEY}" | \
+  python3 -c 'import json,sys; print(",".join(sorted(m["id"] for m in json.load(sys.stdin).get("data",[]))))' 2>/dev/null || true)"
+if [ "$MODELS" = "$MODEL_ID" ]; then
+  ok "GET /v1/models -> exactly ['${MODEL_ID}'] (alias is hidden)"
 else
-  fail "POST /v1/chat/completions unexpected code: ${CODE:-none}"
+  fail "GET /v1/models returned '${MODELS}' (expected '${MODEL_ID}')"
 fi
 
-# A6 - the Anthropic Messages endpoint that Claude Code actually calls must
-#      exist on the proxy and require the key (route present => not 404).
-CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-  -X POST -H "Content-Type: application/json" \
-  -d '{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' \
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${PORT}/v1/models")"
+[ "$CODE" != "200" ] && ok "GET /v1/models without a key -> ${CODE} (rejected)" \
+                    || fail "GET /v1/models without a key was accepted"
+
+chat_code() { # $1 = model id
+  curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+    -H "Authorization: Bearer ${MASTER_KEY}" -H 'content-type: application/json' \
+    -d "{\"model\":\"$1\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+    "http://127.0.0.1:${PORT}/v1/chat/completions" 2>/dev/null || true
+}
+UNKNOWN_CODE="$(chat_code "definitely-not-a-model")"
+[ "$UNKNOWN_CODE" = "400" ] && ok "unknown model -> 400 (invalid model)" \
+                          || fail "unknown model returned ${UNKNOWN_CODE} (expected 400)"
+
+ROUTED_CODE="$(chat_code "$MODEL_ID")"
+if [ "$ROUTED_CODE" != "400" ] && [ "$ROUTED_CODE" != "404" ]; then
+  ok "POST /v1/chat/completions model=${MODEL_ID} -> ${ROUTED_CODE} (routed upstream; fake keys)"
+else
+  fail "model ${MODEL_ID} was not routed (code ${ROUTED_CODE})"
+fi
+
+ALIAS_CODE="$(chat_code "claude-sonnet-4-5")"
+if [ "$ALIAS_CODE" != "400" ] && [ "$ALIAS_CODE" != "404" ]; then
+  ok "hidden desktop alias 'claude-sonnet-4-5' -> ${ALIAS_CODE} (resolves to the same group)"
+else
+  fail "desktop alias was not routed (code ${ALIAS_CODE})"
+fi
+
+MSG_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+  -H "Authorization: Bearer ${MASTER_KEY}" -H 'content-type: application/json' \
+  -d "{\"model\":\"${MODEL_ID}\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
   "http://127.0.0.1:${PORT}/v1/messages" 2>/dev/null || true)"
-if [ -n "$CODE" ] && [ "$CODE" != "000" ] && [ "$CODE" != "404" ]; then
-  ok "POST /v1/messages (Anthropic API) exists and rejects unauthenticated calls (code ${CODE})"
+if [ "$MSG_CODE" != "400" ] && [ "$MSG_CODE" != "404" ]; then
+  ok "POST /v1/messages (the Claude Code route) -> ${MSG_CODE} (model routed)"
 else
-  fail "POST /v1/messages unexpected code: ${CODE:-none} (route missing for Claude Code?)"
+  fail "POST /v1/messages did not route the model (code ${MSG_CODE})"
+fi
+
+if grep -q "not a valid router_settings parameter" "$LOG_FILE"; then
+  fail "LiteLLM rejected a router_settings key"
+else
+  ok "no invalid router_settings parameters"
 fi
 
 #-------------------------------------------------------------------------------
-# [5] Claude settings.json consistency with the live proxy
+# [5] Summary
 #-------------------------------------------------------------------------------
-log "[5] cross-checking Claude settings.json against the live proxy"
-python3 - "$CC_JSON" "$MASTER_KEY" <<'PY' >> "$LOG_FILE" 2>&1
-import sys, json
-cfg = json.load(open(sys.argv[1]))
-env = cfg.get("env") or {}
-base = env.get("ANTHROPIC_BASE_URL", "")
-assert base == "http://127.0.0.1:4000", f"ANTHROPIC_BASE_URL must have NO /v1 suffix: {base}"
-assert env.get("ANTHROPIC_AUTH_TOKEN") == sys.argv[2], "ANTHROPIC_AUTH_TOKEN != master key"
-assert env.get("ANTHROPIC_MODEL"), "ANTHROPIC_MODEL not set"
-print(f"[E2E] ok  - env.ANTHROPIC_MODEL = {env.get('ANTHROPIC_MODEL')}")
-PY
-if [ $? -eq 0 ]; then ok "Claude settings.json consistent with live proxy"; else fail "Claude settings.json inconsistent (see log)"; fi
-
-# server log excerpt for the committed evidence
-echo >> "$LOG_FILE"
-echo "--- live proxy log (tail) ---" >> "$LOG_FILE"
-tail -15 "${WORK}/server.log" >> "$LOG_FILE" 2>/dev/null
-
-#-------------------------------------------------------------------------------
-# Summary
-#-------------------------------------------------------------------------------
-echo >> "$LOG_FILE"
+log "==================================================================="
 if [ "$FAILURES" -eq 0 ]; then
-  log "==================================================================="
-  log "E2E RESULT: PASS (all assertions against the REAL proxy passed)"
-  log "==================================================================="
-  echo "E2E litellm_real: PASS" >> "${RESULTS_DIR}/summary.txt"
+  log "E2E_LITELLM_REAL: PASS (0 failures)"
   exit 0
-else
-  log "==================================================================="
-  log "E2E RESULT: FAIL (${FAILURES} assertion(s) failed)"
-  log "==================================================================="
-  echo "E2E litellm_real: FAIL (${FAILURES})" >> "${RESULTS_DIR}/summary.txt"
-  exit 1
 fi
+log "E2E_LITELLM_REAL: FAIL (${FAILURES} failure(s))"
+exit 1

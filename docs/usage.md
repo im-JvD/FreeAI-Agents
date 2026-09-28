@@ -1,21 +1,34 @@
 <div align="tight" dir="rtl">
 
-# 🎮 راهنمای استفاده از LiteLLM در Claude Code (ویندوز)
+# 🎮 راهنمای استفاده در Claude Code و Claude Desktop (ویندوز)
 
-این سند یعنی: «نصب تمام شد، حالا از کجا شروع کنم؟» — از باز کردن ترمینال تا اولین کد تولیدشده.
+این سند یعنی: «نصب تمام شد، حالا از کجا شروع کنم؟» — از باز کردن ترمینال تا اولین کد تولیدشده. هر دو گیت‌وی (LiteLLM و OmniRoute) با **یک نام مدل** کار می‌کنند: `claude-freeagents`.
 
 ---
 
 ## ۰. تصویر کلی: چه چیزی کجاست؟
 
 ```
-Claude Code (ویندوز)  ──>  http://127.0.0.1:4000  ──>  LiteLLM (WSL)  ──>  پراکسی ویندوز  ──>  Groq / Gemini / Mistral / ...
-        %USERPROFILE%\.claude\settings.json        docker: litellm          v2rayN / Clash
+Claude Code / Desktop (ویندوز)
+        %USERPROFILE%\.claude\settings.json        ─┐
+        %LOCALAPPDATA%\Claude-3p\configLibrary\...  ─┤
+                                                     ▼
+                              گیت‌وی فعال روی 127.0.0.1
+             ┌───────────────────────────┴───────────────────────────┐
+             ▼                                                       ▼
+  LiteLLM  (پورت 4000، داکر)                        OmniRoute (پورت 20128، npm)
+  یک مدل: claude-freeagents                                  یک مدل: claude-freeagents
+  router: retry/cooldown بین کلیدها                          combo با استراتژی auto
+             └───────────────────────────┬───────────────────────────┘
+                                         ▼
+                     پراکسی ویندوز (اختیاری: Clash/v2rayN/Hiddify)
+                                         ▼
+                 Groq / OpenRouter / Google / Cerebras / Mistral / …
 ```
 
 - کلیدها و آدرس پروکسی **از قبل** در `settings.json` ثبت شده‌اند — Claude هیچ کلیدی از شما نمی‌پرسد.
 - شما فقط دو کار می‌کنید: **یک بار Claude را نصب می‌کنید، بعد هر بار فقط `claude` را اجرا می‌کنید.**
-- 🖥️ از **اپ Claude Desktop** استفاده می‌کنید؟ بروید مستقیم به [بخش ۵](#۵-استفاده-در-اپ-claude-desktop-نسخهٔ-ویندوز) — اتصال اپ به همین پروکسی هم پشتیبانی می‌شود.
+- هر دو گیت‌وی یکسان هستند؛ پیش‌فرض بعد از نصب حالت «هر دو»، گیت‌وی فعال **LiteLLM** است.
 
 ---
 
@@ -39,21 +52,21 @@ npm install -g @anthropic-ai/claude-code
 claude --version
 ```
 
-> 💡 برای دیدن فهرست مدل‌های پروکسی در پیکر `/model` به نسخهٔ **v2.1.129 به بعد** نیاز دارید (قابلیت Gateway Model Discovery). اگر قدیمی‌تر بود: `claude update` یا دوباره نصب‌کنندهٔ PowerShell را اجرا کنید.
+> 💡 برای دیدن فهرست مدل‌های گیت‌وی در پیکر `/model` به نسخهٔ **v2.1.129 به بعد** نیاز دارید (قابلیت Gateway Model Discovery). اگر قدیمی‌تر بود: `claude update` یا دوباره نصب‌کنندهٔ PowerShell را اجرا کنید.
 
 ---
 
 ## ۲. بررسی سلامت پشته (در WSL)
 
-قبل از اولین اجرا، مطمئن شوید پروکسی داخل WSL روشن است:
+قبل از اولین اجرا، مطمئن شوید گیت‌وی‌ها روشن‌اند:
 
 ```bash
-freeagents status        # وضعیت کانتینر
-freeagents doctor        # تست کامل: اتصال به هر ارائه‌دهنده + تست واقعی هر مدل
+freeagents status        # وضعیت هر دو گیت‌وی: health، پورت و فایل‌ها
+freeagents doctor        # تشخیص کامل: اتصال به هر ارائه‌دهنده + تست واقعی درخواست
 ```
 
-- اگر خاموش بود: `freeagents up`
-- بعد از ری‌استارت ویندوز، سرویس `litellm.service` خودکار بالا می‌آید (چند ثانیه صبر کنید).
+- اگر خاموش بودند: `freeagents up`
+- بعد از ری‌استارت ویندوز، سرویس‌های `litellm.service` و `omniroute.service` خودکار بالا می‌آیند (چند ثانیه صبر کنید).
 
 ---
 
@@ -81,58 +94,62 @@ claude
 /model
 ```
 
-مدل‌های پروکسی با برچسب **«From gateway»** در فهرست ظاهر می‌شوند:
+مدل گیت‌وی با برچسب **«From gateway»** در فهرست ظاهر می‌شود:
 
-| مدل | مناسب برای |
-|---|---|
-| `claude-gpt-oss-120b` | **پیش‌فرض** — کدنویسی و کار عمومی (Groq، رایگان و سریع) |
-| `claude-gpt-oss-20b` | سؤال‌های کوتاه و سریع (Groq، فوق‌سریع) |
-| `claude-deepseek-v3.1` | کدنویسی + استدلال (OpenRouter، رایگان) |
-| `claude-deepseek-v3-0324` | جایگزین رایگان دیگر (OpenRouter) |
-| `gemini-2.0-flash` | کانتکست بزرگ + مدل پس‌زمینهٔ Claude |
-| `claude-llama3.1-70b` | استنتاج سریع (Cerebras) |
-| `claude-codestral` | تخصصی کدنویسی (Mistral) |
+| مدل | نمایش در کلاد | مناسب برای |
+|---|---|---|
+| `claude-freeagents` | `FreeAgents/LiteLLM` | همه‌کاره — LiteLLM بین همهٔ کلیدهایت retry/cooldown می‌کند |
+| `claude-freeagents` | `FreeAgents/Omni` | همان مدل از مسیر OmniRoute (وقتی گیت‌وی فعال Omni باشد) |
 
-هر مدلی که بعداً به `config.yaml` اضافه کنید، **خودکار** در همین فهرست می‌آید (نیازی به دست‌کاری `settings.json` نیست).
+- فقط **همین یک نام** را انتخاب کنید؛ LiteLLM (یا combo ام OmniRoute) خودش تصمیم می‌گیرد درخواست به کدام ارائه‌دهنده برود.
+- اگر گیت‌وی فعال را عوض کردید (منو → `9` → Switch the ACTIVE gateway)، مدل همان `claude-freeagents` می‌ماند و فقط برچسب (`FreeAgents/…`) و پورت عوض می‌شود.
 
 ---
 
 ## ۵. استفاده در اپ Claude Desktop (نسخهٔ ویندوز)
 
-> ⚠️ **تفاوت مهم:** اپ **Claude Desktop** (پنجرهٔ چت claude.ai) با **Claude Code** (CLI) فرق دارد. اپ Desktop برای گفتگوهای معمولی **مستقیم به سرور Anthropic** وصل می‌شود و به اکانت claude.ai نیاز دارد — این بخش را نمی‌شود عوض کرد. اما بخش ایجنتِ آن (**Cowork**) و نشست‌های Code داخل اپ را می‌شود به پروکسی LiteLLM شما وصل کرد:
+> ⚠️ **تفاوت مهم:** اپ **Claude Desktop** (پنجرهٔ چت claude.ai) با **Claude Code** (CLI) فرق دارد. چت معمولی اپ مستقیم به سرور Anthropic وصل می‌شود و به اکانت claude.ai نیاز دارد — آن بخش قابل تغییر نیست. اما بخش ایجنتِ اپ (**Cowork**) و نشست‌های Code داخل اپ به گیت‌وی شما وصل می‌شوند.
 
-### چرا اسم مدل‌ها `claude-...` است؟
+### ✅ اتصال خودکار (پیش‌فرض)
 
-پیکر مدلِ اپ Desktop فقط idهایی را نشان می‌دهد که در اسمشان `claude` یا `anthropic` باشد. به همین دلیل نصاب، اسم مدل‌ها را با پیشوند `claude-` می‌سازد (`claude-gpt-oss-120b`، `claude-gemini-2.0-flash` و…). اینها فقط **برچسب** هستند — پشت هرکدام همان مدل واقعی (GPT-OSS از Groq، DeepSeek از OpenRouter، Gemini و…) ایستاده و در Claude Code هم با همین اسم‌ها دیده می‌شوند.
+نصاب برای هر دو گیت‌وی پروفایل می‌سازد، در `%LOCALAPPDATA%\Claude-3p\configLibrary\<uuid>.json`:
 
-### ✅ خوب خبر: از نسخهٔ فعلی نصاب، این تنظیمات «خودکار» است
+| گیت‌وی | شناسهٔ پروفایل |
+|---|---|
+| LiteLLM (برچسب `FreeAgents/LiteLLM`) | `…‎a119e` |
+| OmniRoute (برچسب `FreeAgents/Omni`) | `…‎a110e` |
 
-نصاب همان مقادیر را خودش در رجیستری ویندوز می‌نویسد (`HKCU\SOFTWARE\Policies\Claude`) — بعد از اجرای نصاب فقط اپ را ببندید و دوباره باز کنید؛ هیچ‌کدام از مراحل دستی زیر لازم نیست. برای غیرفعال‌کردن این رفتار: `LITELLM_DESKTOP_CONFIG=0 bash setup.sh` (و در حذف نصب، پالیسی هم خودکار پاک می‌شود یا بکاپش برمی‌گردد).
+`_meta.json` هم به‌روز می‌شود و گیت‌وی فعال با `appliedId` علامت می‌خورد؛ `claude_desktop_config.json` هم نوشته می‌شود. بعد از نصب فقط اپ را **کامل ببندید و باز کنید**.
+
+تعویض گیت‌وی فعال: منو → گزینهٔ `9` (Config Manager) → «Switch the ACTIVE gateway». سپس اپ‌های Claude را ری‌استارت کنید.
 
 ### مراحل اتصال دستی (فقط اگر خودکار کار نکرد)
 
 1. اپ Desktop را باز کنید: منوی **Help > Troubleshooting > Enable Developer Mode**
 2. از منوی **Developer** گزینهٔ **Configure Third-Party Inference…** را باز کنید
-3. در بخش **Connection** این مقادیر را بدهید:
+3. در بخش **Connection** این مقادیر را بدهید (مقادیر گیت‌وی فعال):
 
    | فیلد | مقدار |
    |---|---|
    | Inference provider | **Gateway** |
-   | Gateway base URL | `http://127.0.0.1:4000` (بدون `/v1`) |
+   | Gateway base URL | LiteLLM: `http://127.0.0.1:4000` — OmniRoute: `http://127.0.0.1:20128` (بدون `/v1`) |
    | Credential kind | **Static API key** |
-   | Gateway API key | همان **Master Key** (در WSL: `freeagents credentials`) |
+   | Gateway API key | در WSL: `freeagents credentials` (Master Key یا کلید OmniRoute) |
    | Gateway auth scheme | **Bearer** |
 
 4. **Apply** بزنید و اپ را کاملاً ببندید و دوباره باز کنید
-5. داخل گفتگوی **Cowork**، پیکر مدل را باز کنید — مدل‌های `claude-...` آنجا هستند. هر مدلی که بعداً به `config.yaml` اضافه کنید (با اسم حاوی `claude`) خودکار همین‌جا ظاهر می‌شود.
+5. داخل گفتگوی **Cowork**، پیکر مدل را باز کنید — `FreeAgents/LiteLLM` (یا `FreeAgents/Omni`) آنجاست.
+
+### چرا فقط یک مدل می‌بینم؟
+
+چون طراحی جدید **یک مدل واحد برای هر گیت‌وی** است: `claude-freeagents`. پشت این یک نام، همهٔ ارائه‌دهنده‌هایی که کلیدشان را داده‌اید قرار دارند و موتور خودش بین آن‌ها سوئیچ/retry می‌کند. برای هم‌خوانی با کاتالوگ اپ دسکتاپ، یک alias مخفی (`claude-sonnet-4-5`) هم به همان مدل وصل است (در `/v1/models` نمایش داده نمی‌شود).
 
 ### نکته‌ها و رفع اشکال اپ Desktop
 
-- اپ Desktop هنگام باز شدن فهرست مدل‌ها را از پروکسی می‌گیرد (`GET /v1/models`) — پس WSL و کانتینر باید روشن باشند.
-- مدلی در پیکر نیست؟ اپ را کامل ببندید و باز کنید؛ اگر باز هم نیست، نصاب را یک بار دیگر اجرا کنید (اسم‌های `claude-*` به `config.yaml` برمی‌گردند) و `freeagents restart` بزنید.
-- خطای `401` در اپ؟ Master Key را با `freeagents credentials` چک کنید — همان باید در فیلد API key باشد.
-- کلاینت اپ روی همان ویندوز است، پس `127.0.0.1:4000` مستقیم کار می‌کند (WSL2 پورت را با ویندوز به اشتراک می‌گذارد).
-- نسخهٔ اپ باید به اندازهٔ کافی جدید باشد (پشتیبانی Gateway به نسخه‌های 2026 به بعد نیاز دارد) — اپ را از claude.ai/download به‌روز نگه دارید.
+- اپ هنگام باز شدن، فهرست مدل‌ها را از گیت‌وی می‌گیرد (`GET /v1/models`) — پس WSL و گیت‌وی باید روشن باشند.
+- خطای `401`؟ توکن را با `freeagents credentials` چک کنید و با فیلد API key یکی کنید.
+- کلاینت اپ روی همان ویندوز است، پس `127.0.0.1:4000` / `127.0.0.1:20128` مستقیم کار می‌کند (WSL2 پورت را با ویندوز به اشتراک می‌گذارد).
+- نسخهٔ اپ باید جدید باشد (پشتیبانی Gateway در نسخه‌های ۲۰۲۶ به بعد) — از claude.ai/download به‌روز نگه دارید.
 
 ---
 
@@ -152,18 +169,18 @@ claude
 
 ---
 
-## ۷. داشبورد مصرف (اختیاری)
+## ۷. داشبوردها و مدیریت (اختیاری)
 
-در مرورگر ویندوز:
+| کار | دستور |
+|---|---|
+| وضعیت هر دو گیت‌وی | `freeagents status` |
+| تست عمیق (ارائه‌دهنده‌ها + درخواست واقعی) | `freeagents doctor` |
+| لاگ زنده | `freeagents logs litellm` یا `freeagents logs omniroute` |
+| اطلاعات ورود همهٔ پنل‌ها | `freeagents credentials` |
 
-```
-http://127.0.0.1:4000/ui
-```
+پنل LiteLLM: `http://127.0.0.1:4000/ui` (یوزر `admin`، رمز = Master Key) — از Logs همان‌جا می‌بینید هر درخواست به کدام ارائه‌دهنده رفته است.
 
-- Username: `admin`
-- Password: همان **Master Key** (در WSL با `freeagents credentials` دوباره چاپ می‌شود)
-
-از Logs همان‌جا می‌توانید ببینید هر درخواست Claude به کدام مدل/ارائه‌دهنده رفته است.
+داشبورد OmniRoute: `http://127.0.0.1:20128` (رمز در `~/.omniroute/.env`، مقدار `INITIAL_PASSWORD`) — اتصال‌ها، کلیدها و combo `claude-freeagents` اینجا دیده می‌شوند.
 
 ---
 
@@ -171,12 +188,13 @@ http://127.0.0.1:4000/ui
 
 | علامت | علت | راه حل |
 |---|---|---|
-| `ECONNREFUSED` / `fetch failed` هنگام چت | پروکسی داخل WSL خاموش است | در WSL: `freeagents up` |
+| `ECONNREFUSED` / `fetch failed` هنگام چت | گیت‌وی داخل WSL خاموش است | در WSL: `freeagents up` |
 | صفحهٔ Login آنتروپیک موقع اولین اجرا | متغیر قدیمی `ANTHROPIC_API_KEY` در ویندوز ست شده | در Environment Variables ویندوز پاکش کنید؛ ترمینال را عوض کنید |
-| مدل‌های «From gateway» در `/model` نیستند | نسخهٔ Claude قدیمی است | `claude update` → مطمئن شوید v2.1.129+ |
-| خطای `401` هنگام چت | Master Key تغییر کرده ولی `settings.json` قدیمی است | نصاب را دوباره اجرا کنید تا فایل با کلید فعلی بازنویسی شود |
+| مدل «From gateway» در `/model` نیست | نسخهٔ Claude قدیمی است | `claude update` → مطمئن شوید v2.1.129+ |
+| خطای `401` هنگام چت | توکن تغییر کرده ولی `settings.json` قدیمی است | نصاب را دوباره اجرا کنید یا `freeagents credentials` و مقداردهی دستی |
 | فقط مدل‌های Google/Cerebras خطای `403` می‌دهند | پراکسی ویندوز (v2rayN/Clash) خاموش یا Allow LAN خاموش | برنامهٔ پراکسی را روشن کنید؛ در WSL: `freeagents doctor` |
-| هیچ مدل «From gateway»ای جواب نمی‌دهد | اینترنت WSL قطع است | `freeagents doctor` در WSL — بخش PROVIDER نشان می‌دهد کجا قطع است |
+| گیت‌وی فعال را عوض کردم ولی کلاد همان قبلی را می‌زند | اپ‌های Claude ری‌استارت نشده‌اند | همهٔ پنجره‌های Claude را ببندید و باز کنید |
+| OmniRoute بالا نمی‌آید | secretهای کوتاه در `~/.omniroute/.env` | `freeagents doctor omniroute` — حداقل‌ها: JWT≥۳۲، API_KEY_SECRET≥۱۶، رمز≥۸ |
 
 راهنمای کامل‌تر: [troubleshooting.md](troubleshooting.md)
 
@@ -184,12 +202,14 @@ http://127.0.0.1:4000/ui
 
 ## ۹. سؤالات پرتکرار
 
-**هزینه چقدر است؟** مدل‌های Groq و OpenRouter و Gemini و Cerebras رایگان‌اند (سقف مصرف در دقیقه دارند؛ اگر `429` گرفتید مدل را عوض کنید). Mistral هم پلن رایگان دارد.
+**کدام گیت‌وی بهتر است؟** هر دو یک مدل می‌دهند و می‌توانید هر دو را هم‌زمان داشته باشید. LiteLLM (پیش‌فرض) برای retry/cooldown بین کلیدها قوی‌تر است؛ OmniRoute یک داشبورد کامل مدیریت اتصال/کلید دارد و بدون داکر نصب می‌شود.
 
-**هر بار ویندوز را ری‌استارت کردم چه کنم؟** هیچی. WSL و Docker و کانتینر خودشان بالا می‌آیند. فقط اگر Claude اتصال نداد: یک ترمینال WSL باز کنید و `freeagents status` را چک کنید.
+**هزینه چقدر است؟** مدل‌های Groq و OpenRouter و Gemini و Cerebras رایگان‌اند (سقف مصرف در دقیقه دارند؛ اگر `429` گرفتید موتور خودش deployment بعدی را امتحان می‌کند). Mistral هم پلن رایگان دارد.
 
-**چند پروژهٔ همزمان؟** `settings.json` سراسری است — در هر پوشه‌ای که `claude` اجرا کنید به همان یک پروکسی وصل می‌شود.
+**هر بار ویندوز را ری‌استارت کردم چه کنم؟** هیچی. سرویس‌ها خودشان بالا می‌آیند. اگر Claude اتصال نداد: یک ترمینال WSL باز کنید و `freeagents status` را چک کنید.
 
-**تغییر پورت یا اضافه‌کردن مدل؟** [configuration.md](configuration.md)
+**چند پروژهٔ همزمان؟** `settings.json` سراسری است — در هر پوشه‌ای که `claude` اجرا کنید به همان گیت‌وی فعال وصل می‌شود.
+
+**تغییر پورت، اضافه‌کردن مدل، افزودن ارائه‌دهنده؟** [configuration.md](configuration.md)
 
 </div>

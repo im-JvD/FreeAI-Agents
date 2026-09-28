@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#-------------------------------------------------------------------------------
+# Test stub: npm
+#
+# `npm install -g omniroute` "installs" the omniroute CLI stub (the same trick
+# the apt-get stub uses for docker.io), so the installer's package step is
+# exercised without a network.
+#
+# Env:
+#   NPM_FAIL_REGISTRY - a --registry value that must fail once (fallback test)
+#-------------------------------------------------------------------------------
+LOG="${T_WORKSTATE:-/tmp}/npm-calls.log"
+[ -n "${T_WORKSTATE:-}" ] && printf 'npm %s\n' "$*" >> "$LOG"
+
+case " $* " in
+  *" uninstall "*)
+    rm -f "${STUBBIN:?STUBBIN not set}/omniroute" 2>/dev/null || true
+    echo "removed 1 package"
+    exit 0
+    ;;
+esac
+
+case " $* " in
+  *" install "*omniroute*)
+    registry=""
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--registry" ]; then registry="$a"; fi
+      prev="$a"
+    done
+    if [ -n "${NPM_FAIL_REGISTRY:-}" ] && [ "$registry" = "${NPM_FAIL_REGISTRY}" ]; then
+      echo "npm error code ETIMEDOUT (simulated failure for registry $registry)" >&2
+      exit 1
+    fi
+    cp "${STUBBIN}/omniroute.installer" "${STUBBIN}/omniroute"
+    chmod +x "${STUBBIN}/omniroute"
+    echo "added 1 package, and audited 2 packages in 9s"
+    exit 0
+    ;;
+esac
+exit 0

@@ -1,23 +1,37 @@
 #!/usr/bin/env bash
 #===============================================================================
 #
-#   Free AI Agents  |  LiteLLM <-> Claude Code Bridge  |  WSL2 Ubuntu Setup Script
+#   Free AI Agents  |  Unified Local AI Gateway Installer & Manager
+#   for WSL2 Ubuntu  -  LiteLLM + OmniRoute  ->  Claude Code / Claude Desktop
 #
-#   Installs and configures a local LiteLLM proxy inside WSL2 Ubuntu
-#   and wires Claude Code (on the Windows side) to it through the
-#   Anthropic Messages API at http://127.0.0.1:4000/v1/messages
+#   This is the SINGLE unified installer that replaces the two older
+#   per-gateway scripts (the LiteLLM-only and the OmniRoute-only installers).
+#   It installs, configures, wires and manages BOTH gateways, and exposes
+#   exactly one management command:  freeagents
 #
-#   Features:
-#     - Interactive menu: Full Install / Full Uninstall
-#     - Docker installed from Ubuntu apt repo (docker.io), Iran-friendly
-#     - Iranian Docker Hub mirrors for sanctioned networks (403 fix)
-#     - Prebuilt image only: ghcr.io/berriai/litellm:main-latest (NO docker build)
-#     - Auto-generated config.yaml from the API keys you provide
-#     - Auto-generated Claude Code settings.json (env block) on Windows
-#     - Claude DESKTOP app auto-configured via HKCU policy (Cowork gateway)
+#   Engines
+#     - LiteLLM   : Docker container, port 4000, Admin UI, Postgres UI DB
+#     - OmniRoute  : official npm package, port 20128 (dashboard + OpenAI API)
+#
+#   What it does
+#     - installs Docker from the Ubuntu apt repo (docker.io) with Iranian
+#       registry mirrors for sanctioned networks
+#     - collects provider API keys ONCE and applies them to BOTH gateways
+#     - exposes ONE branded model per gateway to Claude:
+#         LiteLLM  -> model id "claude-freeagents"   label "FreeAgents/LiteLLM"
+#         OmniRoute-> model id "claude-freeagents"   label "FreeAgents/Omni"
+#       (LiteLLM: a single model group with every provider as a deployment +
+#        router retries/failover; OmniRoute: a single routing combo)
+#     - writes the Claude Code settings (deep merge, unrelated keys preserved)
+#       and the Claude Desktop third-party-inference profiles
+#     - auto-start on WSL boot (systemd unit, else /etc/wsl.conf boot command)
+#     - management:  freeagents up|down|restart|status|logs|doctor|credentials|
+#                    update|uninstall   +  bare "freeagents" opens the menu
 #
 #   Usage (run WITHOUT sudo - the script escalates where needed):
 #     bash setup.sh
+#
+#   Self-update source: THIS repository only (im-JvD/FreeAI-Agents).
 #
 #===============================================================================
 #-----------------------------------------------------------------------------
@@ -25,70 +39,127 @@
 # bash fails with "set: pipefail: invalid option name".
 # The guard below is a deliberate SINGLE-line simple command (CRLF-safe):
 # it detects CR bytes in this file and re-executes a stripped copy through
-# process substitution. See docs/troubleshooting.md for the manual fix.
+# process substitution.
 #-----------------------------------------------------------------------------
-[ -f "$0" ] && grep -q $'\r' "$0" && exec bash <(tr -d '\r' < "$0") "$@"
+[ -f "$0" ] && grep -q $'\r' "$0" && exec bash <(tr -d '\r' < "$0") "$@" # CR-safe
 
 set -euo pipefail
 
 #-------------------------------------------------------------------------------
 # Constants
 #-------------------------------------------------------------------------------
+FREE_AGENTS_VERSION="4.0.0"
+REPO="im-JvD/FreeAI-Agents"
+
+# THE single model id handed to Claude. It must start with "claude" so that
+# Claude Code's gateway model discovery shows it in the /model picker.
+MODEL_ID="claude-freeagents"
+# Human readable brands (Claude Desktop labelOverride).
+LABEL_LITELLM="FreeAgents/LiteLLM"
+LABEL_OMNI="FreeAgents/Omni"
+# Claude Desktop validates inferenceModels names against the Anthropic catalog
+# in some builds, so the LiteLLM gateway also answers to this catalog id
+# (model_group_alias, hidden from /v1/models).
+CATALOG_MODEL_ID="claude-sonnet-4-5"
+# Auto-compact threshold handed to Claude Code. The smallest context window we
+# route to is 128k, so this keeps every request inside every deployment.
+AUTO_COMPACT_WINDOW="${FREEAGENTS_COMPACT_WINDOW:-120000}"
+
+STATE_DIR="${HOME}/.free-ai-agents"
+LOGS_DIR="${STATE_DIR}/logs"
+MANAGER_COPY="${STATE_DIR}/setup.sh"
+ACTIVE_GATEWAY_FILE="${STATE_DIR}/active_gateway"
+KEYS_FILE="${STATE_DIR}/provider_keys.env"
+WIN_PROXY_FILE="${STATE_DIR}/windows_proxy.txt"
+LEGACY_DIRS=("${HOME}/.omniroute-manager" "${HOME}/omniroute" "${HOME}/omniroute-data")
+
+# ---- LiteLLM engine ---------------------------------------------------------
 CONTAINER_NAME="litellm"
-# Overridable via env: LITELLM_IMAGE=<registry>/berriai/litellm:main-latest
 LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:main-latest}"
-LITELLM_PORT="4000"
+LITELLM_PORT="${LITELLM_PORT:-4000}"
 LITELLM_DIR="${HOME}/.litellm"
 LITELLM_CONFIG="${LITELLM_DIR}/config.yaml"
 LITELLM_KEYFILE="${LITELLM_DIR}/master_key.txt"
 LITELLM_CRED_FILE="${LITELLM_DIR}/dashboard_credentials.txt"
-DAEMON_JSON="/etc/docker/daemon.json"
-CLI_BIN="/usr/local/bin/freeagents"
-BOOT_HELPER="/usr/local/bin/litellm-boot.sh"
-SYSTEMD_UNIT="/etc/systemd/system/litellm.service"
-WSL_CONF="/etc/wsl.conf"
-BOOT_LINE="command = /usr/local/bin/litellm-boot.sh"
-AUTOSTART_MODE=""
-# Admin UI login requires a Postgres DB in recent LiteLLM versions.
-# Disable with LITELLM_UI_DB=0 (the proxy itself keeps working without it).
-UI_DB_ENABLED="${LITELLM_UI_DB:-1}"
 DB_CONTAINER="litellm-db"
 DB_NETWORK="litellm-net"
 DB_IMAGE="${LITELLM_DB_IMAGE:-postgres:16-alpine}"
 DB_USER="litellm"
 DB_NAME="litellm"
 DB_PASSWORD_FILE="${LITELLM_DIR}/db_password.txt"
-# Optional Windows-side proxy (Clash / v2rayN / Hiddify / ...): when set,
-# ALL provider traffic from the LiteLLM container is routed through it.
-WIN_PROXY_FILE="${LITELLM_DIR}/windows_proxy.txt"
-DESKTOP_POLICY_STATUS=""   # off | nops | ok | failed
+UI_DB_ENABLED="${LITELLM_UI_DB:-1}"
 
-# Unified manager: Free AI Agents (LiteLLM + OmniRoute engines)
-FREE_AGENTS_VERSION="3.0.0"
-FREE_AGENTS_DIR="${HOME}/.free-ai-agents"
-OMNI_SCRIPT="${FREE_AGENTS_DIR}/OmniRoute.sh"
-OMNI_RAW_URLS=(
-  "https://raw.githubusercontent.com/im-JvD/OmniRoute-OpenCode/arena/01a0d9b5-omniroute-opencode/OmniRoute.sh"
-  "https://cdn.jsdelivr.net/gh/im-JvD/OmniRoute-OpenCode@arena/01a0d9b5-omniroute-opencode/OmniRoute.sh"
-)
+# ---- OmniRoute engine -------------------------------------------------------
+OMNI_PORT="${OMNIROUTE_PORT:-20128}"
+OMNI_DATA_DIR="${OMNIROUTE_DATA_DIR:-${HOME}/.omniroute}"
+OMNI_ENV_FILE="${OMNI_DATA_DIR}/.env"
+OMNI_LOG_FILE="${LOGS_DIR}/omniroute.log"
+OMNI_PID_FILE="${STATE_DIR}/omniroute.pid"
+OMNI_LAUNCHER="${STATE_DIR}/omniroute-run.sh"
+OMNI_NPM_PACKAGE="${OMNIROUTE_NPM_PACKAGE:-omniroute}"
+OMNI_CONN_NAME="freeagents-install"     # managed provider connection name
+OMNI_KEY_LABEL="freeagents-claude"      # managed client API key label
+OMNI_CLIENT_KEY_FILE="${STATE_DIR}/omniroute_claude.key"
+OMNI_MASTER_KEY_FILE="${STATE_DIR}/omniroute_master.key"
+OMNI_MIN_NODE_MAJOR=20
+
+# ---- system integration -----------------------------------------------------
+CLI_BIN="/usr/local/bin/freeagents"
+BOOT_HELPER="/usr/local/bin/freeagents-boot.sh"
+SYSTEMD_UNIT_OMNI="/etc/systemd/system/omniroute.service"
+SYSTEMD_UNIT_LITELLM="/etc/systemd/system/litellm.service"
+WSL_CONF="/etc/wsl.conf"
+BOOT_LINE="command = /usr/local/bin/freeagents-boot.sh"
+LEGACY_CLI_BINS=("/usr/local/bin/litellm" "/usr/local/bin/omni" "/usr/local/bin/litellm-boot.sh")
+DAEMON_JSON="/etc/docker/daemon.json"
+
+# Claude Desktop third-party-inference profile ids (must be UUIDs)
+DESKTOP_PROFILE_ID_LITELLM="00000000-0000-4000-8000-0000000a119e"
+DESKTOP_PROFILE_ID_OMNI="00000000-0000-4000-8000-0000000a110e"
+
+# Self-update / manager re-download sources - THIS repository only.
 SELF_RAW_URLS=(
-  "https://raw.githubusercontent.com/im-JvD/FreeAI-Agents/main/setup.sh"
-  "https://cdn.jsdelivr.net/gh/im-JvD/FreeAI-Agents@main/setup.sh"
-  "https://raw.githubusercontent.com/im-JvD/FreeAI-Agents/arena/01a0d869-litellm-opencode/setup.sh"
+  "https://raw.githubusercontent.com/${REPO}/main/setup.sh"
+  "https://cdn.jsdelivr.net/gh/${REPO}@main/setup.sh"
 )
-# Claude Desktop 3P profile (configLibrary) id - MUST be a UUID (the app
-# rejects non-UUID ids when listing saved configurations)
-DESKTOP_PROFILE_ID="00000000-0000-4000-8000-0000000a119e"
-MANAGER_COPY="${FREE_AGENTS_DIR}/setup.sh"
-SECONDARY_KEYS_FILE="${HOME}/omniroute-keys.env"
-WIN_PROXY_URL=""
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 # Iranian Docker Hub mirrors (403 / rate-limit workaround)
 REGISTRY_MIRRORS=(
   "https://docker.arvancloud.ir"
   "https://docker.hub.iran.liara.run"
   "https://docker.iranserver.com"
+)
+
+# NPM registry fallbacks (npmjs.org can be slow/blocked in Iran)
+NPM_REGISTRIES=(
+  ""
+  "https://registry.npmmirror.com"
+)
+
+AUTOSTART_MODE=""
+WIN_PROXY_URL=""
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+#-------------------------------------------------------------------------------
+# Provider registry
+#
+#   id | label | env var | key prefix | api_base | verify url | auth | tier |
+#   models ("litellm_model:context_window:max_output_tokens" separated by ,)
+#
+#   tier: primary = asked in the standard key flow
+#         extra   = offered behind the optional "more free providers" question
+#   api_base may be empty (provider default). auth: bearer | query (Google).
+#-------------------------------------------------------------------------------
+PROVIDER_SPECS=(
+  "groq|Groq|GROQ_API_KEY|gsk_|https://api.groq.com/openai/v1|https://api.groq.com/openai/v1/models|bearer|primary|groq/openai/gpt-oss-120b:131072:32768,groq/openai/gpt-oss-20b:131072:32768"
+  "openrouter|OpenRouter|OPENROUTER_API_KEY|sk-or-|https://openrouter.ai/api/v1|https://openrouter.ai/api/v1/key|bearer|primary|openrouter/deepseek/deepseek-chat-v3.1:free:163840:32768,openrouter/deepseek/deepseek-chat-v3-0324:free:163840:32768,openrouter/qwen/qwen3-coder:free:262144:32768"
+  "gemini|Google AI Studio|GEMINI_API_KEY|AIza||https://generativelanguage.googleapis.com/v1beta/models|query|primary|gemini/gemini-2.0-flash:1048576:8192,gemini/gemini-2.5-flash:1048576:65536"
+  "cerebras|Cerebras|CEREBRAS_API_KEY|csk-|https://api.cerebras.ai/v1|https://api.cerebras.ai/v1/models|bearer|primary|cerebras/llama3.1-70b:131072:8192,cerebras/qwen-3-32b:131072:16384"
+  "mistral|Mistral|MISTRAL_API_KEY||https://api.mistral.ai/v1|https://api.mistral.ai/v1/models|bearer|primary|mistral/codestral-latest:262144:32768,mistral/devstral-latest:262144:32768"
+  "github|GitHub Models|GITHUB_API_KEY||https://models.inference.ai.azure.com|https://models.inference.ai.azure.com/models|bearer|extra|github/gpt-4o-mini:131072:16384,github/Llama-3.3-70B-Instruct:131072:8192"
+  "sambanova|SambaNova|SAMBANOVA_API_KEY||https://api.sambanova.ai/v1|https://api.sambanova.ai/v1/models|bearer|extra|sambanova/Meta-Llama-3.3-70B-Instruct:131072:8192,sambanova/DeepSeek-R1-Distill-Llama-70B:131072:8192"
+  "nvidia_nim|NVIDIA NIM|NVIDIA_NIM_API_KEY|nvapi-|https://integrate.api.nvidia.com/v1|https://integrate.api.nvidia.com/v1/models|bearer|extra|nvidia_nim/meta/llama-3.3-70b-instruct:131072:8192,nvidia_nim/deepseek-ai/deepseek-r1:131072:8192"
+  "together_ai|Together AI|TOGETHERAI_API_KEY||https://api.together.xyz/v1|https://api.together.xyz/v1/models|bearer|extra|together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo:131072:8192"
 )
 
 #-------------------------------------------------------------------------------
@@ -115,29 +186,168 @@ trap 'echo; log_warn "Interrupted by user. Exiting."; exit 130' INT TERM
 SUDO=""
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
-  log_warn "Running as root. Config will be created under /root/.litellm"
+  log_warn "Running as root. Config will be created under /root/.free-ai-agents"
 else
   if ! command -v sudo >/dev/null 2>&1; then
     die "'sudo' is not installed and you are not root. Install sudo first:  apt-get install -y sudo"
   fi
   SUDO="sudo"
-  # Silent if passwordless; otherwise prompts once for the password.
   $SUDO -n true 2>/dev/null || $SUDO true 2>/dev/null || \
     die "Sudo authentication failed. Please configure sudo for this user."
 fi
 
-check_wsl_environment() {
-  log_info "[1/9] Checking WSL2 environment..."
-  if ! grep -qi "microsoft" /proc/version 2>/dev/null; then
-    log_warn "This does not look like a WSL kernel (/proc/version)."
-    log_warn "Continuing anyway - Windows/PowerShell integration may fail."
-  fi
-  find_powershell >/dev/null || \
-    die "powershell.exe was not found. Enable WSL interop (append Windows PATH) and try again."
-  log_ok "WSL2 environment looks good."
+#-------------------------------------------------------------------------------
+# Small utilities
+#-------------------------------------------------------------------------------
+have() { command -v "$1" >/dev/null 2>&1; }
+
+is_number() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac; return 0; }
+
+ensure_state_dirs() {
+  mkdir -p "$STATE_DIR" "$LOGS_DIR" 2>/dev/null || true
 }
 
-# Locate powershell.exe (works even if Windows PATH interop is disabled)
+# read a single-line secret file safely
+read_secret() { [ -s "$1" ] && tr -d '\n' < "$1" || true; }
+
+# atomic write: write to a temp file next to the target, then mv into place
+get_env_line() { # $1 file $2 key
+  [ -s "$1" ] || return 1
+  awk -v key="$2" 'index($0, key "=") == 1 { sub("^" key "=", ""); print; exit }' "$1"
+}
+
+# first $2 characters of $1 on a single line (no pipes: SIGPIPE would abort
+# the script under `set -o pipefail`)
+snippet() { # $1 text  $2 max chars (default 160)
+  local text="${1:-}" limit="${2:-160}"
+  text="${text//$'\n'/ }"
+  text="${text//$'\r'/}"
+  printf '%s' "${text:0:limit}"
+}
+
+mask_key() {
+  local k="${1:-}"
+  if [ -z "$k" ]; then echo "<skipped>"; return; fi
+  if [ "${#k}" -ge 12 ]; then
+    echo "${k:0:4}****${k: -4}"
+  else
+    echo "****"
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Provider registry accessors
+#-------------------------------------------------------------------------------
+spec_field() { # $1 spec  $2 index(1-based)
+  printf '%s' "$1" | cut -d'|' -f"$2"
+}
+
+provider_spec_by_id() { # $1 provider id -> prints spec
+  local s
+  for s in "${PROVIDER_SPECS[@]}"; do
+    [ "$(spec_field "$s" 1)" = "$1" ] && { printf '%s' "$s"; return 0; }
+  done
+  return 1
+}
+
+providers_in_tier() { # $1 tier
+  local s
+  for s in "${PROVIDER_SPECS[@]}"; do
+    [ "$(spec_field "$s" 8)" = "$1" ] && printf '%s\n' "$(spec_field "$s" 1)"
+  done
+}
+
+all_provider_ids() {
+  local s
+  for s in "${PROVIDER_SPECS[@]}"; do printf '%s\n' "$(spec_field "$s" 1)"; done
+}
+
+provider_label()  { provider_spec_by_id "$1" | cut -d'|' -f2; }
+provider_env()    { provider_spec_by_id "$1" | cut -d'|' -f3; }
+provider_prefix() { provider_spec_by_id "$1" | cut -d'|' -f4; }
+provider_base()   { provider_spec_by_id "$1" | cut -d'|' -f5; }
+provider_verify() { provider_spec_by_id "$1" | cut -d'|' -f6; }
+provider_auth()   { provider_spec_by_id "$1" | cut -d'|' -f7; }
+provider_models() { provider_spec_by_id "$1" | cut -d'|' -f9; }
+
+provider_key() { # $1 provider id -> key value from the collected globals
+  local v
+  case "$1" in
+    groq)       v="${KEY_GROQ:-}" ;;
+    openrouter) v="${KEY_OPENROUTER:-}" ;;
+    gemini)     v="${KEY_GEMINI:-}" ;;
+    cerebras)   v="${KEY_CEREBRAS:-}" ;;
+    mistral)    v="${KEY_MISTRAL:-}" ;;
+    github)     v="${KEY_GITHUB:-}" ;;
+    sambanova)  v="${KEY_SAMBANOVA:-}" ;;
+    nvidia_nim) v="${KEY_NVIDIA_NIM:-}" ;;
+    together_ai) v="${KEY_TOGETHER_AI:-}" ;;
+    *)          v="" ;;
+  esac
+  printf '%s' "$v"
+}
+
+provider_set_key() { # $1 provider id  $2 value
+  case "$1" in
+    groq)        KEY_GROQ="$2" ;;
+    openrouter)  KEY_OPENROUTER="$2" ;;
+    gemini)      KEY_GEMINI="$2" ;;
+    cerebras)    KEY_CEREBRAS="$2" ;;
+    mistral)     KEY_MISTRAL="$2" ;;
+    github)      KEY_GITHUB="$2" ;;
+    sambanova)   KEY_SAMBANOVA="$2" ;;
+    nvidia_nim)  KEY_NVIDIA_NIM="$2" ;;
+    together_ai) KEY_TOGETHER_AI="$2" ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# All configured providers, one id per line
+configured_providers() {
+  local p
+  for p in $(all_provider_ids); do
+    [ -n "$(provider_key "$p")" ] && printf '%s\n' "$p"
+  done
+}
+
+configured_provider_count() {
+  local n=0
+  for p in $(all_provider_ids); do
+    [ -n "$(provider_key "$p")" ] && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
+# Persist / restore the provider keys so re-runs keep working even when the
+# engines are not reachable (the single source of truth is KEYS_FILE).
+save_provider_keys() {
+  ensure_state_dirs
+  local p
+  : > "${KEYS_FILE}.tmp"
+  chmod 600 "${KEYS_FILE}.tmp" 2>/dev/null || true
+  for p in $(all_provider_ids); do
+    local k; k="$(provider_key "$p")"
+    [ -n "$k" ] && printf '%s=%s\n' "$(provider_env "$p")" "$k" >> "${KEYS_FILE}.tmp"
+  done
+  mv -f "${KEYS_FILE}.tmp" "$KEYS_FILE"
+  chmod 600 "$KEYS_FILE" 2>/dev/null || true
+}
+
+load_provider_keys() {
+  [ -s "$KEYS_FILE" ] || return 1
+  local p found=0
+  for p in $(all_provider_ids); do
+    local v
+    v="$(get_env_line "$KEYS_FILE" "$(provider_env "$p")" || true)"
+    if [ -n "$v" ]; then provider_set_key "$p" "$v"; found=1; fi
+  done
+  [ "$found" -eq 1 ]
+}
+
+#-------------------------------------------------------------------------------
+# Environment / Windows integration detection
+#-------------------------------------------------------------------------------
 find_powershell() {
   if command -v powershell.exe >/dev/null 2>&1; then
     command -v powershell.exe
@@ -153,37 +363,61 @@ find_powershell() {
   return 1
 }
 
+windows_integration_available() {
+  [ "${FREEAGENTS_SKIP_WINDOWS:-0}" = "1" ] && return 1
+  find_powershell >/dev/null 2>&1
+}
+
 # Get the real Windows user profile path (safe with spaces in the username)
-# and convert it to its WSL mount point, e.g.:
-#   C:\Users\John Doe  ->  /mnt/c/Users/John Doe
+# and convert it to its WSL mount point:  C:\Users\John Doe -> /mnt/c/Users/John Doe
 get_windows_home() {
   local ps raw drive letter rest
   ps="$(find_powershell)" || return 1
   raw="$($ps -NoProfile -Command "[Environment]::GetFolderPath('UserProfile')" 2>/dev/null | tr -d '\r')"
   [ -n "$raw" ] || return 1
-
   drive="${raw%%:*}"
   letter="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
   rest="${raw#*:}"
-  rest="${rest//\\//}"          # backslashes -> forward slashes
-
+  rest="${rest//\\//}"
   printf '/mnt/%s%s' "$letter" "$rest"
 }
 
-# Convert a WSL-side Windows path back to its Windows form:
-#   /mnt/c/Users/John Doe/.claude/x.reg  ->  C:\Users\John Doe\.claude\x.reg
-wsl_to_win_path() {
-  local p="${1#/mnt/}"
-  local drive="${p%%/*}"
-  local rest="${p#*/}"
-  printf '%s:\\%s' "$(printf '%s' "$drive" | tr '[:lower:]' '[:upper:]')" "$(printf '%s' "$rest" | tr '/' '\\')"
+# LocalApplicationData (%LOCALAPPDATA%) as a WSL path
+get_windows_localappdata() {
+  local ps raw drive letter rest
+  ps="$(find_powershell)" || return 1
+  raw="$($ps -NoProfile -Command "[Environment]::GetFolderPath('LocalApplicationData')" 2>/dev/null | tr -d '\r' | head -n1)"
+  [ -n "$raw" ] || return 1
+  drive="${raw%%:*}"
+  letter="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
+  rest="${raw#*:}"
+  rest="${rest//\\//}"
+  printf '/mnt/%s%s' "$letter" "$rest"
+}
+
+check_environment() {
+  log_info "[1/7] Checking the environment..."
+  if ! grep -qi "microsoft" /proc/version 2>/dev/null; then
+    log_warn "This does not look like a WSL kernel (/proc/version)."
+    log_warn "Continuing anyway - the Windows integration may fail."
+  fi
+  if windows_integration_available; then
+    log_ok "Windows integration available (powershell.exe found)."
+  elif [ "${FREEAGENTS_SKIP_WINDOWS:-0}" = "1" ]; then
+    log_warn "Windows integration disabled on purpose (FREEAGENTS_SKIP_WINDOWS=1)."
+    log_warn "Claude Code / Claude Desktop will NOT be configured automatically."
+  else
+    log_warn "powershell.exe was not found - the Windows side cannot be configured."
+    log_warn "The gateways will still be installed; set up Claude manually later, or"
+    log_warn "enable WSL interop and re-run."
+  fi
 }
 
 #-------------------------------------------------------------------------------
-# Docker installation (apt repo, NOT get.docker.com) + Iranian mirrors
+# Docker (apt repo, NOT get.docker.com) + Iranian mirrors
 #-------------------------------------------------------------------------------
 install_docker() {
-  log_info "[2/9] Installing Docker Engine (docker.io from Ubuntu apt repository)..."
+  log_info "[2/7] Installing Docker Engine (docker.io from the Ubuntu apt repository)..."
   if ! command -v docker >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     $SUDO apt-get update -y
@@ -194,16 +428,17 @@ install_docker() {
 }
 
 configure_docker_mirrors() {
-  log_info "[3/9] Configuring Iranian Docker Hub mirrors (${DAEMON_JSON})..."
+  log_info "[3/7] Configuring Iranian Docker Hub mirrors (${DAEMON_JSON})..."
   $SUDO mkdir -p /etc/docker
 
-  if [ -f "$DAEMON_JSON" ]; then
-    local backup="${DAEMON_JSON}.bak.$(date +%Y%m%d%H%M%S)"
+  if [ -f "$DAEMON_JSON" ] || $SUDO test -f "$DAEMON_JSON" 2>/dev/null; then
+    local backup
+    backup="${DAEMON_JSON}.bak.$(date +%Y%m%d%H%M%S)"
     $SUDO cp "$DAEMON_JSON" "$backup"
     log_warn "Existing daemon.json backed up to: ${backup}"
   fi
 
-  local mirrors_json=""
+  local mirrors_json="" m
   for m in "${REGISTRY_MIRRORS[@]}"; do
     [ -n "$mirrors_json" ] && mirrors_json+=",\n    "
     mirrors_json+="\"${m}\""
@@ -219,12 +454,9 @@ configure_docker_mirrors() {
 start_docker_daemon() {
   log_info "       Starting/restarting the Docker daemon..."
   $SUDO service docker restart >/dev/null 2>&1 || $SUDO service docker start >/dev/null 2>&1 || true
-
-  # Enable auto-start on boot when systemd is available (WSL2 with systemd=true)
   if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     $SUDO systemctl enable docker.service >/dev/null 2>&1 || true
   fi
-
   local i
   for i in $(seq 1 20); do
     if $SUDO docker info >/dev/null 2>&1; then
@@ -237,169 +469,13 @@ start_docker_daemon() {
 }
 
 #-------------------------------------------------------------------------------
-# API keys
-#-------------------------------------------------------------------------------
-mask_key() {
-  local k="$1"
-  if [ -z "$k" ]; then echo "<skipped>"; return; fi
-  if [ "${#k}" -ge 12 ]; then
-    echo "${k:0:4}****${k: -4}"
-  else
-    echo "****"
-  fi
-}
-
-# Read the provider API keys stored in an existing container (previous install).
-# Sets EXISTING_* variables; returns 0 when at least one key was found.
-read_existing_keys_from_container() {
-  EXISTING_GROQ=""; EXISTING_OPENROUTER=""; EXISTING_GEMINI=""
-  EXISTING_CEREBRAS=""; EXISTING_MISTRAL=""
-  command -v docker >/dev/null 2>&1 || return 1
-  local envs
-  envs="$($SUDO docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
-  [ -n "$envs" ] || return 1
-  EXISTING_GROQ="$(printf '%s\n' "$envs" | sed -n 's/^GROQ_API_KEY=//p' | head -1)"
-  EXISTING_OPENROUTER="$(printf '%s\n' "$envs" | sed -n 's/^OPENROUTER_API_KEY=//p' | head -1)"
-  EXISTING_GEMINI="$(printf '%s\n' "$envs" | sed -n 's/^GEMINI_API_KEY=//p' | head -1)"
-  EXISTING_CEREBRAS="$(printf '%s\n' "$envs" | sed -n 's/^CEREBRAS_API_KEY=//p' | head -1)"
-  EXISTING_MISTRAL="$(printf '%s\n' "$envs" | sed -n 's/^MISTRAL_API_KEY=//p' | head -1)"
-  [ -n "$EXISTING_GROQ" ] || [ -n "$EXISTING_OPENROUTER" ] || \
-    [ -n "$EXISTING_GEMINI" ] || [ -n "$EXISTING_CEREBRAS" ] || [ -n "$EXISTING_MISTRAL" ]
-}
-
-# Warn when a pasted value does not match the provider's known key prefix
-# (catches keys pasted into the wrong prompt, e.g. Groq key into OpenRouter).
-warn_key_prefix() {
-  local val="$1" prefix="$2" name="$3"
-  [ -n "$val" ] || return 0
-  case "$val" in
-    "$prefix"*) return 0 ;;
-    *)
-      log_warn "       NOTE: this value does not look like a ${name} key (expected prefix '${prefix}') - double-check it."
-      ;;
-  esac
-}
-
-ask_all_keys() {
-  # Prompt for all five provider keys; at least one is mandatory.
-  local attempts=0
-  while true; do
-    attempts=$((attempts + 1))
-    read -r -p "       [1/5] Groq API key        (gsk_...): " GROQ_KEY || true
-    read -r -p "       [2/5] OpenRouter API key (sk-or-...): " OPENROUTER_KEY || true
-    read -r -p "       [3/5] Google AI key      (AIza...): " GEMINI_KEY || true
-    read -r -p "       [4/5] Cerebras API key   (csk-...): " CEREBRAS_KEY || true
-    read -r -p "       [5/5] Mistral API key    (sk-...) : " MISTRAL_KEY || true
-
-    # Strip any accidental whitespace
-    GROQ_KEY="${GROQ_KEY//[[:space:]]/}"
-    OPENROUTER_KEY="${OPENROUTER_KEY//[[:space:]]/}"
-    GEMINI_KEY="${GEMINI_KEY//[[:space:]]/}"
-    CEREBRAS_KEY="${CEREBRAS_KEY//[[:space:]]/}"
-    MISTRAL_KEY="${MISTRAL_KEY//[[:space:]]/}"
-
-    warn_key_prefix "$GROQ_KEY"       "gsk_"   "Groq"
-    warn_key_prefix "$OPENROUTER_KEY" "sk-or-" "OpenRouter"
-    warn_key_prefix "$GEMINI_KEY"     "AIza"   "Google AI"
-    warn_key_prefix "$CEREBRAS_KEY"   "csk-"   "Cerebras"
-
-    KEY_COUNT=0
-    [ -n "$GROQ_KEY" ]       && KEY_COUNT=$((KEY_COUNT + 1)) || true
-    [ -n "$OPENROUTER_KEY" ] && KEY_COUNT=$((KEY_COUNT + 1)) || true
-    [ -n "$GEMINI_KEY" ]     && KEY_COUNT=$((KEY_COUNT + 1)) || true
-    [ -n "$CEREBRAS_KEY" ]   && KEY_COUNT=$((KEY_COUNT + 1)) || true
-    [ -n "$MISTRAL_KEY" ]    && KEY_COUNT=$((KEY_COUNT + 1)) || true
-
-    if [ "$KEY_COUNT" -ge 1 ]; then
-      echo
-      log_ok "Collected ${KEY_COUNT} API key(s):"
-      echo "         Groq       : $(mask_key "$GROQ_KEY")"
-      echo "         OpenRouter : $(mask_key "$OPENROUTER_KEY")"
-      echo "         Google AI  : $(mask_key "$GEMINI_KEY")"
-      echo "         Cerebras   : $(mask_key "$CEREBRAS_KEY")"
-      echo "         Mistral    : $(mask_key "$MISTRAL_KEY")"
-      return 0
-    fi
-    if [ "$attempts" -ge 3 ]; then
-      die "At least ONE API key is required. Exiting after ${attempts} attempts."
-    fi
-    log_error "At least ONE API key is required. Let's try again."
-    echo
-  done
-}
-
-verify_api_keys() {
-  # Live-check every provided key against its provider endpoint.
-  # Non-fatal: unreachable providers are skipped (e.g. blocked networks);
-  # genuinely rejected keys (401/403) are collected in VERIFY_FAILED.
-  VERIFY_FAILED=""
-  [ "${LITELLM_KEY_CHECK:-1}" = "1" ] || return 0
-  command -v curl >/dev/null 2>&1 || return 0
-  local proxy_args=()
-  [ -n "$WIN_PROXY_URL" ] && proxy_args=(-x "$WIN_PROXY_URL")
-
-  echo
-  log_info "       Verifying API keys against the providers..."
-  local timeout="${LITELLM_KEY_CHECK_TIMEOUT:-10}"
-  case "$timeout" in ''|*[!0-9]*) timeout=10 ;; esac
-
-  _verify_one() { # $1 name  $2 key  $3 url  $4 auth(bearer|query)
-    [ -n "$2" ] || return 0
-    local code
-    if [ "$4" = "query" ]; then
-      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout" ${proxy_args[@]+"${proxy_args[@]}"} "$3?key=$2" 2>/dev/null || true)"
-    else
-      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout" ${proxy_args[@]+"${proxy_args[@]}"} -H "Authorization: Bearer $2" "$3" 2>/dev/null || true)"
-    fi
-    case "$code" in
-      200)
-        log_ok "         ${1}: valid (HTTP 200)"
-        ;;
-      401|403)
-        log_warn "         ${1}: REJECTED (HTTP ${code}) - wrong/unknown key for this provider"
-        VERIFY_FAILED="${VERIFY_FAILED}${1} "
-        ;;
-      000|'')
-        log_warn "         ${1}: could not verify (network unreachable/blocked) - continuing"
-        ;;
-      *)
-        log_warn "         ${1}: HTTP ${code} - continuing"
-        VERIFY_FAILED="${VERIFY_FAILED}${1} "
-        ;;
-    esac
-    return 0
-  }
-
-  _verify_one "Groq"       "$GROQ_KEY"       "https://api.groq.com/openai/v1/models"                   bearer
-  _verify_one "OpenRouter" "$OPENROUTER_KEY" "https://openrouter.ai/api/v1/key"                        bearer
-  _verify_one "Google AI"  "$GEMINI_KEY"     "https://generativelanguage.googleapis.com/v1beta/models" query
-  _verify_one "Cerebras"   "$CEREBRAS_KEY"   "https://api.cerebras.ai/v1/models"                       bearer
-  _verify_one "Mistral"    "$MISTRAL_KEY"    "https://api.mistral.ai/v1/models"                        bearer
-  return 0
-}
-
-offer_key_reentry() {
-  [ -n "$VERIFY_FAILED" ] || return 1
-  echo
-  printf "       Re-enter the rejected keys now? [y/N]: "
-  local answer=""
-  read -r answer || answer=""
-  case "$answer" in
-    y|Y|yes|YES) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-#-------------------------------------------------------------------------------
-# Optional: route provider traffic through a proxy running on WINDOWS
+# Windows proxy (optional): route provider traffic through a Windows-side proxy
 #-------------------------------------------------------------------------------
 detect_windows_ip() {
-  # WSL2 (NAT mode): the Windows host is the default gateway of eth0.
   local gw=""
   gw="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"
   case "$gw" in
     ""|127.*|0.0.0.0|::1)
-      # Mirrored networking mode or unusual setup - try resolv.conf.
       gw="$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
       case "$gw" in
         ""|127.*|0.0.0.0|::1) return 1 ;;
@@ -410,32 +486,57 @@ detect_windows_ip() {
   return 0
 }
 
+# Load the stored proxy URL (used by re-key / re-apply paths - important:
+# the old scripts lost the proxy setting when re-entering tokens).
+load_windows_proxy() {
+  WIN_PROXY_URL="$(read_secret "$WIN_PROXY_FILE")"
+  return 0
+}
+
+normalize_proxy_url() {
+  local addr="$1"
+  case "$addr" in
+    http://*|https://*|socks5://*|socks5h://*) printf '%s' "$addr" ;;
+    *) printf 'http://%s' "$addr" ;;
+  esac
+}
+
+test_proxy() { # $1 = proxy url -> prints http code
+  local code=""
+  if have curl; then
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -x "$1" \
+      "https://api.groq.com/openai/v1/models" 2>/dev/null || true)"
+  fi
+  printf '%s' "${code:-000}"
+}
+
 configure_windows_proxy() {
-  # Asked once per install: should LiteLLM's outbound provider traffic be
-  # routed through a proxy app running on the WINDOWS side? The answer is
-  # stored in WIN_PROXY_FILE and injected into the container as
-  # HTTP_PROXY / HTTPS_PROXY (NO_PROXY covers local traffic only).
   WIN_PROXY_URL=""
   local previous="" answer="" detected="" suggestion="" addr="" code=""
-  [ -s "$WIN_PROXY_FILE" ] && previous="$(tr -d '\n' < "$WIN_PROXY_FILE" 2>/dev/null || true)"
+  previous="$(read_secret "$WIN_PROXY_FILE")"
+
+  # Re-entering tokens must not silently drop or re-ask about the proxy.
+  if [ "${FREEAGENTS_PROXY_MODE:-}" = "keep" ]; then
+    WIN_PROXY_URL="$previous"
+    if [ -n "$WIN_PROXY_URL" ]; then
+      log_ok "       Windows proxy kept: ${WIN_PROXY_URL}"
+    else
+      log_info "       Windows proxy: disabled (direct connections)."
+    fi
+    return 0
+  fi
 
   echo
   log_info "       --- Windows proxy routing (optional) ---"
   echo "       If a proxy app runs on Windows (Clash / v2rayN / Hiddify / Nekoray),"
-  echo "       LiteLLM can route ALL provider traffic through it - this fixes region"
-  echo "       blocks (Google / Cerebras / ...) without a system-wide VPN."
+  echo "       the gateways can route ALL provider traffic through it - this fixes"
+  echo "       region blocks (Google / Cerebras / ...) without a system-wide VPN."
   if [ -n "$previous" ]; then
     printf "       Keep the Windows proxy setting? (%s) [Y/n]: " "$previous"
     read -r answer || answer=""
     case "$answer" in
-      n|N|no|No|NO)
-        echo "       OK - enter the new proxy details below."
-        ;;
-      *)
-        WIN_PROXY_URL="$previous"
-        log_ok "       Windows proxy kept: ${WIN_PROXY_URL}"
-        return 0
-        ;;
+      n|N|no|No|NO) echo "       OK - enter the new proxy details below." ;;
+      *) WIN_PROXY_URL="$previous"; log_ok "       Windows proxy kept: ${WIN_PROXY_URL}"; return 0 ;;
     esac
   else
     printf "       Route provider traffic through your Windows proxy? [y/N]: "
@@ -464,44 +565,32 @@ configure_windows_proxy() {
     log_warn "       No address entered - Windows proxy disabled."
     return 0
   fi
-  case "$addr" in
-    http://*|https://*|socks5://*|socks5h://*) : ;;
-    *) addr="http://${addr}" ;;
-  esac
+  addr="$(normalize_proxy_url "$addr")"
   WIN_PROXY_URL="$addr"
 
-  # Live test through the proxy (Groq endpoint - fast and region-free).
-  code=""
-  if command -v curl >/dev/null 2>&1; then
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -x "$WIN_PROXY_URL" "https://api.groq.com/openai/v1/models" 2>/dev/null || true)"
-  fi
-  if [ -n "$code" ] && [ "$code" != "000" ]; then
+  code="$(test_proxy "$addr")"
+  if [ "$code" != "000" ]; then
     log_ok "       Proxy reachable - test call through it returned HTTP ${code}."
   else
     log_warn "       Test call through the proxy FAILED (code ${code:-none})."
     echo "       Check that the proxy app is running and allows LAN connections, and"
     echo "       that the IP is the WINDOWS host IP (in WSL: ip route show default)."
     case "$addr" in
-      http://127.0.0.1*|https://127.0.0.1*|socks5://127.0.0.1*|socks5h://127.0.0.1*|127.0.0.1:*)
+      http://127.0.0.1*|https://127.0.0.1*|socks5://127.0.0.1*|socks5h://127.0.0.1*)
         echo "       NOTE: 127.0.0.1 inside WSL is the WSL VM itself, NOT Windows."
         echo "       Use the WINDOWS host IP (the default suggested above) instead."
         ;;
     esac
     echo "       SOCKS proxies are supported too: enter them as socks5://IP:PORT."
-    echo "       (WSL accepts 127.0.0.1 only in mirrored networking mode - Win11)"
     printf "       Save it anyway? [y/N]: "
     read -r answer || answer=""
     case "$answer" in
       y|Y|yes|Yes|YES) : ;;
-      *)
-        WIN_PROXY_URL=""
-        log_warn "       Windows proxy disabled."
-        return 0
-        ;;
+      *) WIN_PROXY_URL=""; log_warn "       Windows proxy disabled."; return 0 ;;
     esac
   fi
 
-  mkdir -p "$LITELLM_DIR"
+  ensure_state_dirs
   printf '%s\n' "$WIN_PROXY_URL" > "$WIN_PROXY_FILE"
   chmod 600 "$WIN_PROXY_FILE" 2>/dev/null || true
   log_ok "       Windows proxy enabled: ${WIN_PROXY_URL}"
@@ -509,58 +598,153 @@ configure_windows_proxy() {
   return 0
 }
 
-collect_api_keys() {
-  echo
-  log_info "[4/9] API keys setup (5 providers)"
-  if [ "${LITELLM_FORCE_REKEY:-0}" = "1" ]; then
-    log_info "       Key refresh requested (Config Manager) - enter the new keys."
-    echo "       Press ENTER to skip a provider you do not use."
-    echo
-    ask_all_keys
-    verify_api_keys
-    if offer_key_reentry; then
-      echo "       OK - enter the keys again below."
-      echo
-      ask_all_keys
-      verify_api_keys
+#-------------------------------------------------------------------------------
+# API keys: collect (file -> container/env -> prompt) + live verification
+#-------------------------------------------------------------------------------
+warn_key_prefix() {
+  local val="$1" prefix="$2" name="$3"
+  [ -n "$val" ] || return 0
+  [ -n "$prefix" ] || return 0
+  case "$val" in
+    "$prefix"*) return 0 ;;
+    *) log_warn "       NOTE: this value does not look like a ${name} key (expected prefix '${prefix}') - double-check it." ;;
+  esac
+}
+
+# Read provider keys that a previous install stored in the LiteLLM container env
+read_keys_from_container() {
+  have docker || return 1
+  local envs p found=0
+  envs="$($SUDO docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  [ -n "$envs" ] || return 1
+  for p in $(all_provider_ids); do
+    local ev v
+    ev="$(provider_env "$p")"
+    v="$(printf '%s\n' "$envs" | awk -v key="$ev" 'index($0, key "=") == 1 { sub("^" key "=", ""); print; exit }')"
+    if [ -n "$v" ]; then provider_set_key "$p" "$v"; found=1; fi
+  done
+  [ "$found" -eq 1 ]
+}
+
+print_provider_summary() {
+  local p k
+  echo "       Provider keys:"
+  for p in $(all_provider_ids); do
+    k="$(provider_key "$p")"
+    [ -n "$k" ] || continue
+    printf '         %-12s : %s\n' "$(provider_label "$p")" "$(mask_key "$k")"
+  done
+}
+
+ask_keys_tier() { # $1 = primary|extra ; sets KEY_* globals; returns 1 if none
+  local tier="$1" p label prefix val count=0
+  local ids; ids="$(providers_in_tier "$tier")"
+  [ -n "$ids" ] || return 1
+  for p in $ids; do
+    label="$(provider_label "$p")"
+    prefix="$(provider_prefix "$p")"
+    if [ -n "$prefix" ]; then
+      printf "       %-16s (%s...): " "$label" "$prefix"
+    else
+      printf "       %-16s (key)    : " "$label"
     fi
-    return 0
-  fi
+    val=""
+    read -r val || val=""
+    val="${val//[[:space:]]/}"
+    warn_key_prefix "$val" "$prefix" "$label"
+    if [ -n "$val" ]; then
+      provider_set_key "$p" "$val"
+      count=$((count + 1))
+    fi
+  done
+  printf '       ---\n'
+  [ "$count" -gt 0 ]
+}
+
+verify_keys() {
+  # Live-check every provided key against its provider endpoint. Non-fatal:
+  # unreachable providers are skipped (blocked networks); rejected keys (401/403)
+  # are collected in VERIFY_FAILED.
+  VERIFY_FAILED=""
+  [ "${FREEAGENTS_KEY_CHECK:-1}" = "1" ] || return 0
+  have curl || return 0
+  VERIFY_FAILED_COUNT=0
+  local p key url auth code timeout proxy_args=()
+  timeout="${FREEAGENTS_KEY_CHECK_TIMEOUT:-10}"
+  is_number "$timeout" || timeout=10
+  [ -n "$WIN_PROXY_URL" ] && proxy_args=(-x "$WIN_PROXY_URL")
+
+  echo
+  log_info "       Verifying the provider keys (live)..."
+  for p in $(configured_providers); do
+    key="$(provider_key "$p")"
+    url="$(provider_verify "$p")"
+    auth="$(provider_auth "$p")"
+    [ -n "$url" ] || continue
+    if [ "$auth" = "query" ]; then
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout" ${proxy_args[@]+"${proxy_args[@]}"} "$url?key=$key" 2>/dev/null || true)"
+    else
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout" ${proxy_args[@]+"${proxy_args[@]}"} -H "Authorization: Bearer $key" "$url" 2>/dev/null || true)"
+    fi
+    case "$code" in
+      200|201|204)
+        log_ok "         $(provider_label "$p"): valid (HTTP ${code})"
+        ;;
+      401|403)
+        log_warn "         $(provider_label "$p"): REJECTED (HTTP ${code}) - wrong/unknown key for this provider"
+        VERIFY_FAILED="${VERIFY_FAILED}${p} "
+        VERIFY_FAILED_COUNT=$((VERIFY_FAILED_COUNT + 1))
+        ;;
+      000|'')
+        log_warn "         $(provider_label "$p"): could not verify (network unreachable/blocked) - continuing"
+        ;;
+      *)
+        log_warn "         $(provider_label "$p"): HTTP ${code} - continuing"
+        VERIFY_FAILED="${VERIFY_FAILED}${p} "
+        VERIFY_FAILED_COUNT=$((VERIFY_FAILED_COUNT + 1))
+        ;;
+    esac
+  done
+  return 0
+}
+
+offer_key_reentry() {
+  [ -n "$VERIFY_FAILED" ] || return 1
+  echo
+  printf "       Re-enter the rejected keys now? [y/N]: "
+  local answer=""
+  read -r answer || answer=""
+  case "$answer" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+collect_keys() {
+  echo
+  log_info "[4/7] API keys setup (${#PROVIDER_SPECS[@]} supported providers)"
+  load_windows_proxy
   configure_windows_proxy
 
-  # A previous install? Offer to keep the already-configured keys.
-  if read_existing_keys_from_container; then
-    echo "       Existing API keys found (from the previous install):"
-    echo "         Groq       : $(mask_key "$EXISTING_GROQ")"
-    echo "         OpenRouter : $(mask_key "$EXISTING_OPENROUTER")"
-    echo "         Google AI  : $(mask_key "$EXISTING_GEMINI")"
-    echo "         Cerebras   : $(mask_key "$EXISTING_CEREBRAS")"
-    echo "         Mistral    : $(mask_key "$EXISTING_MISTRAL")"
-    local answer="" keep_answers=0
+  local answer="" attempts=0
+
+  # 1) keys from a previous install (local state file first, then container env)
+  #    (skipped by the "re-enter provider tokens" flow, where ENTER = skip)
+  if [ "${FREEAGENTS_FRESH_KEYS:-0}" != "1" ] && { load_provider_keys || read_keys_from_container; }; then
+    echo "       Existing provider keys found (from the previous install):"
+    print_provider_summary
     while true; do
       printf "       Keep these keys? [Y/n]: "
       read -r answer || answer=""
       case "$answer" in
         ""|y|Y|yes|Yes|YES)
-          GROQ_KEY="$EXISTING_GROQ"
-          OPENROUTER_KEY="$EXISTING_OPENROUTER"
-          GEMINI_KEY="$EXISTING_GEMINI"
-          CEREBRAS_KEY="$EXISTING_CEREBRAS"
-          MISTRAL_KEY="$EXISTING_MISTRAL"
-          KEY_COUNT=0
-          [ -n "$GROQ_KEY" ]       && KEY_COUNT=$((KEY_COUNT + 1)) || true
-          [ -n "$OPENROUTER_KEY" ] && KEY_COUNT=$((KEY_COUNT + 1)) || true
-          [ -n "$GEMINI_KEY" ]     && KEY_COUNT=$((KEY_COUNT + 1)) || true
-          [ -n "$CEREBRAS_KEY" ]   && KEY_COUNT=$((KEY_COUNT + 1)) || true
-          [ -n "$MISTRAL_KEY" ]    && KEY_COUNT=$((KEY_COUNT + 1)) || true
-          echo
-          log_ok "Keeping the existing ${KEY_COUNT} API key(s)."
-          verify_api_keys
+          save_provider_keys
+          log_ok "Keeping the existing $(configured_provider_count) provider key(s)."
+          verify_keys
           if offer_key_reentry; then
-            echo "       OK - enter the replacement keys below."
-            echo
-            ask_all_keys
-            verify_api_keys
+            ask_keys_tier primary || true
+            save_provider_keys
+            verify_keys
           fi
           return 0
           ;;
@@ -570,35 +754,65 @@ collect_api_keys() {
           break
           ;;
         *)
-          keep_answers=$((keep_answers + 1))
-          if [ "$keep_answers" -ge 5 ]; then
-            log_warn "       Unrecognized input - keeping the existing keys."
-            return 0
-          fi
+          attempts=$((attempts + 1))
+          [ "$attempts" -ge 5 ] && { log_warn "Unrecognized input - keeping the existing keys."; return 0; }
           echo "       Please answer y (keep) or n (replace)."
           ;;
       esac
     done
   fi
 
+  # 2) fresh collection
   echo "       Press ENTER to skip a provider you do not use."
   echo "       At least ONE key is required."
   echo
-  ask_all_keys
-  verify_api_keys
+  answer=""
+  local tries=0
+  while true; do
+    tries=$((tries + 1))
+    ask_keys_tier primary || true
+    if [ "$(configured_provider_count)" -ge 1 ]; then break; fi
+    if [ "$tries" -ge 3 ]; then
+      die "At least ONE API key is required. Exiting after ${tries} attempts."
+    fi
+    log_error "At least ONE API key is required. Let's try again."
+    echo
+  done
+  save_provider_keys
+  log_ok "Collected $(configured_provider_count) provider key(s)."
+  print_provider_summary
+
+  # 3) optional extra free providers
+  printf "       Add more free providers (GitHub Models, SambaNova, NVIDIA NIM, Together AI)? [y/N]: "
+  read -r answer || answer=""
+  case "$answer" in
+    y|Y|yes|Yes|YES)
+      echo "       Press ENTER to skip any provider you do not use."
+      ask_keys_tier extra || true
+      save_provider_keys
+      ;;
+  esac
+
+  verify_keys
   if offer_key_reentry; then
     echo "       OK - enter the keys again below."
     echo
-    ask_all_keys
-    verify_api_keys
+    ask_keys_tier primary || true
+    save_provider_keys
+    verify_keys
   fi
   return 0
 }
 
+#===============================================================================
+# LiteLLM engine
+#   - one generated config.yaml (single model group, every provider as a
+#     deployment, router retries/failover, optional Admin UI database)
+#   - Docker container "litellm" on port 4000, restart=unless-stopped
+#===============================================================================
 ensure_db_password() {
-  # Stable across reinstalls so the stored pgdata stays accessible.
   if [ -s "$DB_PASSWORD_FILE" ]; then
-    DB_PASSWORD="$(tr -d '\n' < "$DB_PASSWORD_FILE")"
+    DB_PASSWORD="$(read_secret "$DB_PASSWORD_FILE")"
   else
     if command -v openssl >/dev/null 2>&1; then
       DB_PASSWORD="$(openssl rand -hex 16)"
@@ -613,11 +827,9 @@ ensure_db_password() {
 }
 
 generate_master_key() {
-  # Keep the master key stable across reinstalls (dashboard login + every
-  # client that stored it stay valid). Only generate one when none exists.
   local reused=0
   if [ -s "$LITELLM_KEYFILE" ]; then
-    MASTER_KEY="$(tr -d '\n' < "$LITELLM_KEYFILE")"
+    MASTER_KEY="$(read_secret "$LITELLM_KEYFILE")"
     reused=1
   elif command -v openssl >/dev/null 2>&1; then
     MASTER_KEY="sk-$(openssl rand -hex 32)"
@@ -627,12 +839,15 @@ generate_master_key() {
   mkdir -p "$LITELLM_DIR"
   printf '%s\n' "$MASTER_KEY" > "$LITELLM_KEYFILE"
   chmod 600 "$LITELLM_KEYFILE"
-  # dedicated dashboard login file (the UI password IS the master key)
   {
     echo "LiteLLM Admin Panel (UI)"
     echo "  URL      : http://127.0.0.1:${LITELLM_PORT}/ui"
     echo "  Username : admin"
     echo "  Password : ${MASTER_KEY}"
+    echo ""
+    echo "Claude / API clients"
+    echo "  Base URL : http://127.0.0.1:${LITELLM_PORT}"
+    echo "  Model id : ${MODEL_ID}"
   } > "$LITELLM_CRED_FILE"
   chmod 600 "$LITELLM_CRED_FILE"
   if [ "$reused" -eq 1 ]; then
@@ -644,129 +859,85 @@ generate_master_key() {
 }
 
 #-------------------------------------------------------------------------------
-# config.yaml (only providers whose keys were provided)
+# config.yaml: ONE model (claude-freeagents) backed by every configured provider
 #-------------------------------------------------------------------------------
 generate_litellm_config() {
-  log_info "[5/9] Generating LiteLLM configuration: ${LITELLM_CONFIG}"
+  log_info "[5/7] Generating the LiteLLM configuration: ${LITELLM_CONFIG}"
   mkdir -p "$LITELLM_DIR"
 
+  local p models spec mname ctx maxout api_base env_name dep_index=0
   {
+    echo "# Free AI Agents - generated by setup.sh v${FREE_AGENTS_VERSION}"
+    echo "# Single model group '${MODEL_ID}' with every configured provider as a"
+    echo "# deployment: LiteLLM load-balances and retries across them."
     echo "model_list:"
 
-    if [ -n "$GROQ_KEY" ]; then
-      cat <<'EOF'
-  # ---------------- Groq (fast inference) ----------------
-  # NOTE: model_name MUST contain 'claude' - the Claude Desktop app
-  #       model picker only keeps ids containing 'claude' or 'anthropic'.
-  - model_name: claude-gpt-oss-120b
-    litellm_params:
-      model: groq/openai/gpt-oss-120b
-      api_key: os.environ/GROQ_API_KEY
-      api_base: https://api.groq.com/openai/v1
-  - model_name: claude-gpt-oss-20b
-    litellm_params:
-      model: groq/openai/gpt-oss-20b
-      api_key: os.environ/GROQ_API_KEY
-      api_base: https://api.groq.com/openai/v1
-EOF
-    fi
-
-    if [ -n "$OPENROUTER_KEY" ]; then
-      cat <<'EOF'
-  # ---------------- OpenRouter (free coding models) ----------------
-  - model_name: claude-deepseek-v3.1
-    litellm_params:
-      model: openrouter/deepseek/deepseek-chat-v3.1:free
-      api_key: os.environ/OPENROUTER_API_KEY
-      api_base: https://openrouter.ai/api/v1
-  - model_name: claude-deepseek-v3-0324
-    litellm_params:
-      model: openrouter/deepseek/deepseek-chat-v3-0324:free
-      api_key: os.environ/OPENROUTER_API_KEY
-      api_base: https://openrouter.ai/api/v1
-EOF
-    fi
-
-    if [ -n "$GEMINI_KEY" ]; then
-      cat <<'EOF'
-  # ---------------- Google AI Studio (Gemini) ----------------
-  - model_name: claude-gemini-2.0-flash
-    litellm_params:
-      model: gemini/gemini-2.0-flash
-      api_key: os.environ/GEMINI_API_KEY
-EOF
-    fi
-
-    if [ -n "$CEREBRAS_KEY" ]; then
-      cat <<'EOF'
-  # ---------------- Cerebras ----------------
-  - model_name: claude-llama3.1-70b
-    litellm_params:
-      model: cerebras/llama3.1-70b
-      api_key: os.environ/CEREBRAS_API_KEY
-      api_base: https://api.cerebras.ai/v1
-EOF
-    fi
-
-    if [ -n "$MISTRAL_KEY" ]; then
-      cat <<'EOF'
-  # ---------------- Mistral ----------------
-  - model_name: claude-codestral
-    litellm_params:
-      model: mistral/codestral-latest
-      api_key: os.environ/MISTRAL_API_KEY
-      api_base: https://api.mistral.ai/v1
-EOF
-    fi
-
-    # Canonical Anthropic-named aliases. The Claude Desktop config validator
-    # only accepts Anthropic catalog names (e.g. claude-sonnet-4-5); these
-    # route to the SAME free underlying models as the primary/fast pick.
-    if [ -n "$GROQ_KEY$OPENROUTER_KEY$GEMINI_KEY$CEREBRAS_KEY$MISTRAL_KEY" ]; then
-      local amain="" afast=""
-      if   [ -n "$GROQ_KEY" ]; then
-        amain="groq/openai/gpt-oss-120b|https://api.groq.com/openai/v1|GROQ_API_KEY"
-        afast="groq/openai/gpt-oss-20b|https://api.groq.com/openai/v1|GROQ_API_KEY"
-      elif [ -n "$OPENROUTER_KEY" ]; then
-        amain="openrouter/deepseek/deepseek-chat-v3.1:free|https://openrouter.ai/api/v1|OPENROUTER_API_KEY"
-        afast="openrouter/deepseek/deepseek-chat-v3-0324:free|https://openrouter.ai/api/v1|OPENROUTER_API_KEY"
-      elif [ -n "$GEMINI_KEY" ]; then
-        amain="gemini/gemini-2.0-flash||GEMINI_API_KEY"
-        afast="gemini/gemini-2.0-flash||GEMINI_API_KEY"
-      elif [ -n "$CEREBRAS_KEY" ]; then
-        amain="cerebras/llama3.1-70b|https://api.cerebras.ai/v1|CEREBRAS_API_KEY"
-        afast="cerebras/llama3.1-70b|https://api.cerebras.ai/v1|CEREBRAS_API_KEY"
-      else
-        amain="mistral/codestral-latest|https://api.mistral.ai/v1|MISTRAL_API_KEY"
-        afast="$amain"
-      fi
-      local atarget="" abase="" akeyvar=""
-      for apair in "$amain|sonnet" "$afast|haiku"; do
-        atarget="$(printf '%s' "$apair" | cut -d'|' -f1)"
-        abase="$(printf '%s' "$apair" | cut -d'|' -f2)"
-        akeyvar="$(printf '%s' "$apair" | cut -d'|' -f3)"
-        local amodel="${apair##*|}"
-        if [ "$amodel" = "sonnet" ]; then aname="claude-sonnet-4-5"; else aname="claude-haiku-4-5"; fi
-        echo "  - model_name: ${aname}"
+    for p in $(configured_providers); do
+      env_name="$(provider_env "$p")"
+      api_base="$(provider_base "$p")"
+      models="$(provider_models "$p")"
+      echo "  # ---------------- $(provider_label "$p") ----------------"
+      local IFS=','
+      for spec in $models; do
+        unset IFS
+        mname="${spec%%:*}"
+        local rest="${spec#*:}"
+        ctx="${rest%%:*}"
+        maxout="${rest#*:}"
+        is_number "$ctx" || ctx=131072
+        is_number "$maxout" || maxout=8192
+        dep_index=$((dep_index + 1))
+        echo "  - model_name: ${MODEL_ID}"
         echo "    litellm_params:"
-        echo "      model: ${atarget}"
-        echo "      api_key: os.environ/${akeyvar}"
-        [ -n "$abase" ] && echo "      api_base: ${abase}"
+        echo "      model: ${mname}"
+        echo "      api_key: os.environ/${env_name}"
+        [ -n "$api_base" ] && echo "      api_base: ${api_base}"
+        echo "      drop_params: true"
+        echo "    model_info:"
+        echo "      id: fa-${p}-${dep_index}"
+        echo "      mode: chat"
+        echo "      context_window: ${ctx}"
+        echo "      max_input_tokens: ${ctx}"
+        echo "      max_output_tokens: ${maxout}"
       done
-    fi
+    done
 
     echo ""
+    echo "# Router behaviour: if one provider fails or is rate-limited, the next"
+    echo "# deployment in the '${MODEL_ID}' group is tried automatically."
+    echo "router_settings:"
+    echo "  routing_strategy: simple-shuffle"
+    echo "  num_retries: 3"
+    echo "  retry_after: 1"
+    echo "  allowed_fails: 3"
+    echo "  cooldown_time: 30"
+    echo "  timeout: 600"
+    echo "  enable_pre_call_checks: true"
+    echo "  # Claude Desktop validates model names against the Anthropic catalog in"
+    echo "  # some builds. This alias routes that catalog id to the SAME single group"
+    echo "  # while 'hidden' keeps /v1/models clean (only ${MODEL_ID} is advertised)."
+    echo "  model_group_alias:"
+    echo "    ${CATALOG_MODEL_ID}:"
+    echo "      model: ${MODEL_ID}"
+    echo "      hidden: true"
+    echo ""
     echo "litellm_settings:"
-    echo "  drop_params: true        # silently drop unsupported provider params"
+    echo "  drop_params: true          # silently drop unsupported provider params"
+    echo "  request_timeout: 600"
+    echo "  num_retries: 2"
+    echo "  json_logs: false"
     echo ""
     echo "general_settings:"
     echo "  master_key: os.environ/LITELLM_MASTER_KEY"
+    # clients (Claude Code/Desktop) talk to LiteLLM directly on localhost
+    echo "  trusted_proxy_ranges: []"
     if [ "$UI_DB_ENABLED" = "1" ]; then
       echo "  database_url: os.environ/DATABASE_URL"
     fi
   } > "$LITELLM_CONFIG"
+  chmod 644 "$LITELLM_CONFIG" 2>/dev/null || true
 
-  log_ok "config.yaml generated (only providers with keys are enabled)."
+  log_ok "config.yaml generated (${dep_index} deployment(s) behind '${MODEL_ID}')."
 }
 
 #-------------------------------------------------------------------------------
@@ -774,17 +945,17 @@ EOF
 #-------------------------------------------------------------------------------
 build_docker_env_args() {
   DOCKER_ENV_ARGS=(-e "LITELLM_MASTER_KEY=${MASTER_KEY}")
-  # Admin panel (UI) login credentials: http://127.0.0.1:4000/ui
   DOCKER_ENV_ARGS+=(-e "UI_USERNAME=admin" -e "UI_PASSWORD=${MASTER_KEY}")
   if [ "$UI_DB_ENABLED" = "1" ]; then
     ensure_db_password
     DOCKER_ENV_ARGS+=(-e "DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@${DB_CONTAINER}:5432/${DB_NAME}")
   fi
-  if [ -n "$GROQ_KEY" ];       then DOCKER_ENV_ARGS+=(-e "GROQ_API_KEY=${GROQ_KEY}"); fi
-  if [ -n "$OPENROUTER_KEY" ]; then DOCKER_ENV_ARGS+=(-e "OPENROUTER_API_KEY=${OPENROUTER_KEY}"); fi
-  if [ -n "$GEMINI_KEY" ];     then DOCKER_ENV_ARGS+=(-e "GEMINI_API_KEY=${GEMINI_KEY}"); fi
-  if [ -n "$CEREBRAS_KEY" ];   then DOCKER_ENV_ARGS+=(-e "CEREBRAS_API_KEY=${CEREBRAS_KEY}"); fi
-  if [ -n "$MISTRAL_KEY" ];    then DOCKER_ENV_ARGS+=(-e "MISTRAL_API_KEY=${MISTRAL_KEY}"); fi
+  local p k env_name
+  for p in $(configured_providers); do
+    k="$(provider_key "$p")"
+    env_name="$(provider_env "$p")"
+    DOCKER_ENV_ARGS+=(-e "${env_name}=${k}")
+  done
   if [ -n "$WIN_PROXY_URL" ]; then
     DOCKER_ENV_ARGS+=(-e "HTTP_PROXY=${WIN_PROXY_URL}" \
                       -e "HTTPS_PROXY=${WIN_PROXY_URL}" \
@@ -812,7 +983,7 @@ ensure_db_stack() {
       -e "POSTGRES_DB=${DB_NAME}" \
       -v "${LITELLM_DIR}/pgdata:/var/lib/postgresql/data" \
       "$DB_IMAGE" >/dev/null
-    log_ok "       Database container '${DB_CONTAINER}' started (restart policy: unless-stopped)."
+    log_ok "       Database container '${DB_CONTAINER}' started."
   else
     log_ok "       Database container '${DB_CONTAINER}' already present."
   fi
@@ -837,27 +1008,20 @@ remove_existing_container() {
   return 0
 }
 
-pull_liteLLM_image() {
-  log_info "[6/9] Pulling prebuilt LiteLLM image (no build step): ${LITELLM_IMAGE}"
-  log_info "       This may take several minutes on the first run..."
-
-  # Is a usable image already stored locally (previous install)?
+pull_litellm_image() {
+  log_info "[5/7] Pulling the prebuilt LiteLLM image: ${LITELLM_IMAGE}"
   local have_local=0
   if $SUDO docker image inspect "$LITELLM_IMAGE" >/dev/null 2>&1; then
     have_local=1
     log_ok "       Image already exists locally (from a previous install)."
   fi
-
-  # Transient TLS handshake timeouts are common on filtered networks -> retry.
   local attempts="${LITELLM_PULL_RETRIES:-3}"
-  case "$attempts" in ''|*[!0-9]*) attempts=3 ;; esac
-  attempts="$((attempts < 1 ? 1 : attempts))"
+  is_number "$attempts" || attempts=3
+  attempts=$((attempts < 1 ? 1 : attempts))
 
   local i
   for i in $(seq 1 "$attempts"); do
-    if [ "$i" -gt 1 ]; then
-      log_warn "       Retry ${i}/${attempts} (transient TLS/network timeouts are common)..."
-    fi
+    [ "$i" -gt 1 ] && log_warn "       Retry ${i}/${attempts} (transient TLS/network timeouts are common)..."
     if $SUDO docker pull "$LITELLM_IMAGE"; then
       log_ok "Image pulled successfully."
       return 0
@@ -865,14 +1029,11 @@ pull_liteLLM_image() {
     [ "$i" -lt "$attempts" ] && sleep 5
   done
 
-  # Continue with the already-downloaded image instead of failing hard.
   if [ "$have_local" -eq 1 ]; then
     log_warn "Pull failed, but the image already exists locally - continuing with the local copy."
-    log_warn "To update it later, fix the connection and run: ${SUDO} docker pull ${LITELLM_IMAGE}"
     return 0
   fi
 
-  # Optional last resort: a ghcr pull-through mirror, e.g. ghcr.nju.edu.cn
   if [ -n "${LITELLM_GHCR_MIRROR:-}" ]; then
     local mirror_image="${LITELLM_GHCR_MIRROR%/}/berriai/litellm:main-latest"
     log_warn "       Trying the ghcr fallback mirror: ${mirror_image}"
@@ -891,15 +1052,13 @@ pull_liteLLM_image() {
 }
 
 start_litellm_container() {
-  log_info "[7/9] Starting LiteLLM container on port ${LITELLM_PORT}..."
+  log_info "Starting the LiteLLM container on port ${LITELLM_PORT}..."
   ensure_db_stack
   remove_existing_container
   build_docker_env_args
 
   local net_args=()
-  if [ "$UI_DB_ENABLED" = "1" ]; then
-    net_args+=(--network "$DB_NETWORK")
-  fi
+  [ "$UI_DB_ENABLED" = "1" ] && net_args+=(--network "$DB_NETWORK")
 
   $SUDO docker run -d \
     --name "$CONTAINER_NAME" \
@@ -915,49 +1074,1052 @@ start_litellm_container() {
   log_ok "Container '${CONTAINER_NAME}' started (restart policy: unless-stopped)."
 }
 
+litellm_health_code() {
+  if have curl; then
+    curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      "http://127.0.0.1:${LITELLM_PORT}/health/liveliness" 2>/dev/null || true
+  elif have wget; then
+    if wget -q -O /dev/null "http://127.0.0.1:${LITELLM_PORT}/health/liveliness" 2>/dev/null; then
+      echo 200
+    else
+      echo 000
+    fi
+  else
+    echo "n/a"
+  fi
+}
+
 wait_for_litellm() {
-  # First boot with the database runs schema migrations - allow more time.
+  local wait_sec="${LITELLM_HEALTH_WAIT_SEC:-}"
   local max_iters
-  if [ -n "${LITELLM_HEALTH_WAIT_SEC:-}" ]; then
-    max_iters=$(( (LITELLM_HEALTH_WAIT_SEC + 1) / 2 ))
+  if [ -n "$wait_sec" ]; then
+    is_number "$wait_sec" || wait_sec=""
+  fi
+  if [ -n "$wait_sec" ]; then
+    max_iters=$(( (wait_sec + 1) / 2 ))
   elif [ "$UI_DB_ENABLED" = "1" ]; then
     max_iters=60
   else
     max_iters=30
   fi
   log_info "       Waiting for LiteLLM to become healthy (up to $((max_iters * 2))s)..."
-  local i http_code=""
+  local i code
   for i in $(seq 1 "$max_iters"); do
-    http_code=""
-    if command -v curl >/dev/null 2>&1; then
-      http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${LITELLM_PORT}/health/liveliness" 2>/dev/null || true)"
-    elif command -v wget >/dev/null 2>&1; then
-      if wget -q -O /dev/null "http://127.0.0.1:${LITELLM_PORT}/health/liveliness" 2>/dev/null; then
-        http_code="200"
-      fi
-    else
-      log_warn "       Neither curl nor wget found - skipping health check."
+    code="$(litellm_health_code)"
+    if [ "$code" = "200" ]; then
+      log_ok "LiteLLM is healthy: http://127.0.0.1:${LITELLM_PORT}"
       return 0
     fi
-    if [ "$http_code" = "200" ]; then
-      log_ok "LiteLLM is healthy: http://127.0.0.1:${LITELLM_PORT}"
+    if [ "$code" = "n/a" ]; then
+      log_warn "       Neither curl nor wget found - skipping the health check."
       return 0
     fi
     sleep 2
   done
   log_warn "Health check timed out. The proxy may still be booting."
   log_warn "Inspect logs with:  ${SUDO} docker logs -f ${CONTAINER_NAME}"
+  return 0
+}
+
+litellm_container_exists() { $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"; }
+litellm_container_running() { $SUDO docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"; }
+litellm_installed() { [ -f "$LITELLM_CONFIG" ] || litellm_container_exists; }
+
+#===============================================================================
+# OmniRoute engine (official npm distribution - no third-party forks)
+#   - Node.js >= 20 (installed from NodeSource when missing/too old)
+#   - npm install -g omniroute   (npmjs.org, npmmirror fallback)
+#   - managed .env (secrets preserved + length-checked), launcher + service
+#   - configuration through the official REST API (docs/openapi.yaml):
+#       POST /api/auth/login          -> management session cookie (auth_token)
+#       POST /api/providers           -> upsert of a managed connection
+#       POST /api/keys                -> client API key for Claude (name field)
+#       GET  /api/models/catalog      -> live model ids per provider
+#       POST|PUT /api/combos          -> the single branded routing combo
+#   - ONE branded model id (claude-freeagents) backed by every provider
+#===============================================================================
+omni_base_url() { printf 'http://127.0.0.1:%s' "$OMNI_PORT"; }
+
+#-------------------------------------------------------------------------------
+# Node.js / npm
+#-------------------------------------------------------------------------------
+node_major() {
+  have node || { printf ''; return 1; }
+  node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1
+}
+
+ensure_node_runtime() {
+  local major
+  major="$(node_major || true)"
+  if is_number "$major" && [ "$major" -ge "$OMNI_MIN_NODE_MAJOR" ]; then
+    log_ok "       Node.js $(node -v) is new enough."
+  else
+    log_info "       Installing Node.js ${OMNI_MIN_NODE_MAJOR}+ (required by OmniRoute)..."
+    export DEBIAN_FRONTEND=noninteractive
+    if have apt-get; then
+      $SUDO apt-get install -y ca-certificates curl gnupg >/dev/null 2>&1 || true
+      if have curl && curl -fsSL --max-time 60 \
+           "https://deb.nodesource.com/setup_${OMNI_MIN_NODE_MAJOR}.x" -o /tmp/nodesource_setup.sh 2>/dev/null \
+         && $SUDO bash /tmp/nodesource_setup.sh >/dev/null 2>&1; then
+        $SUDO apt-get install -y nodejs >/dev/null 2>&1 || true
+      fi
+      rm -f /tmp/nodesource_setup.sh 2>/dev/null || true
+    fi
+    major="$(node_major || true)"
+    if ! is_number "$major" || [ "$major" -lt "$OMNI_MIN_NODE_MAJOR" ]; then
+      # last resort: Ubuntu's own package (may be older than 20)
+      if have apt-get && ! have node; then
+        $SUDO apt-get install -y nodejs npm >/dev/null 2>&1 || true
+      fi
+      major="$(node_major || true)"
+    fi
+    if ! is_number "$major" || [ "$major" -lt "$OMNI_MIN_NODE_MAJOR" ]; then
+      die "Node.js ${OMNI_MIN_NODE_MAJOR}+ is required but not available (found: $(node -v 2>/dev/null || echo none)).
+         Install it manually and re-run:
+           curl -fsSL https://deb.nodesource.com/setup_${OMNI_MIN_NODE_MAJOR}.x | sudo -E bash -
+           sudo apt-get install -y nodejs"
+    fi
+    log_ok "       Node.js $(node -v) installed."
+  fi
+  have npm || die "npm was not found next to Node.js. Install the 'npm' package and re-run."
+  return 0
+}
+
+npm_install_omniroute() {
+  if have omniroute && [ "${OMNIROUTE_FORCE_NPM_INSTALL:-0}" != "1" ]; then
+    log_ok "       OmniRoute CLI already installed ($(command -v omniroute))."
+    return 0
+  fi
+  local reg out args=()
+  for reg in "${NPM_REGISTRIES[@]}"; do
+    args=()
+    if [ -n "$reg" ]; then
+      args+=(--registry "$reg")
+      log_info "       npm install -g ${OMNI_NPM_PACKAGE} (registry: ${reg})..."
+    else
+      log_info "       npm install -g ${OMNI_NPM_PACKAGE} (default registry)..."
+    fi
+    out="$($SUDO npm install -g "${args[@]}" "$OMNI_NPM_PACKAGE" 2>&1)" && {
+      log_ok "       OmniRoute installed: $(command -v omniroute)"
+      return 0
+    }
+    log_warn "       npm install failed on '${reg:-default}': $(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+  done
+  die "Could not install the OmniRoute npm package (${OMNI_NPM_PACKAGE}).
+         Check the network/npm registry and re-run, or install it manually:
+           npm install -g ${OMNI_NPM_PACKAGE}"
 }
 
 #-------------------------------------------------------------------------------
-# Auto-start on WSL boot + management CLI (freeagents up/down/restart/uninstall)
+# Managed .env (secrets preserved across re-runs, weak values regenerated)
+#   OmniRoute validates this file at startup and refuses to boot when a secret
+#   is missing or too short: API_KEY_SECRET >= 16 chars (required) and
+#   JWT_SECRET >= 32 chars when it is set.
 #-------------------------------------------------------------------------------
-write_boot_helper() {
-  $SUDO mkdir -p "$(dirname "$BOOT_HELPER")"
+omni_strong_secret() { # $1 = current value, $2 = minimum length -> prints a value
+  local current="${1:-}" min="${2:-16}" value=""
+  if [ -n "$current" ] && [ "${#current}" -ge "$min" ]; then
+    printf '%s' "$current"
+    return 0
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    value="$(openssl rand -base64 48 2>/dev/null | tr -d '\n ')"
+  fi
+  if [ -z "$value" ]; then
+    value="$(od -An -N48 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  fi
+  [ -n "$value" ] || value="$(date +%s%N)-${RANDOM}-${RANDOM}-omniroute-fallback-secret-value"
+  if [ -n "$current" ] && [ "${#current}" -lt "$min" ]; then
+    log_warn "       A stored OmniRoute secret was too short and has been regenerated." >&2
+  fi
+  printf '%s' "$value"
+}
+
+write_omni_env() {
+  log_info "       Writing the OmniRoute environment file: ${OMNI_ENV_FILE}"
+  mkdir -p "$OMNI_DATA_DIR"
+  local jwt="" akey="" pass=""
+  if [ -s "$OMNI_ENV_FILE" ]; then
+    jwt="$(get_env_line "$OMNI_ENV_FILE" JWT_SECRET || true)"
+    akey="$(get_env_line "$OMNI_ENV_FILE" API_KEY_SECRET || true)"
+    pass="$(get_env_line "$OMNI_ENV_FILE" INITIAL_PASSWORD || true)"
+  fi
+  jwt="$(omni_strong_secret "$jwt" 32)"
+  akey="$(omni_strong_secret "$akey" 16)"
+  [ -n "$pass" ] && [ "${#pass}" -ge 8 ] || pass="$(omni_strong_secret "" 16)"
+
+  {
+    echo "# Free AI Agents - managed OmniRoute environment (regenerated on install)."
+    echo "# Secrets are preserved across re-runs so dashboard logins and stored"
+    echo "# provider keys keep working. OmniRoute refuses to boot when they are"
+    echo "# missing or shorter than its minimums (JWT>=32, API_KEY_SECRET>=16)."
+    echo "JWT_SECRET=${jwt}"
+    echo "API_KEY_SECRET=${akey}"
+    echo "INITIAL_PASSWORD=${pass}"
+    echo "PORT=${OMNI_PORT}"
+    echo "API_HOST=127.0.0.1"
+    echo "DATA_DIR=${OMNI_DATA_DIR}"
+    # /v1 requests must carry an API key (we provision a managed client key).
+    echo "REQUIRE_API_KEY=true"
+    if [ -n "$WIN_PROXY_URL" ]; then
+      echo "HTTP_PROXY=${WIN_PROXY_URL}"
+      echo "HTTPS_PROXY=${WIN_PROXY_URL}"
+      echo "ALL_PROXY=${WIN_PROXY_URL}"
+      echo "NO_PROXY=localhost,127.0.0.1,::1"
+    fi
+    # Gemini accepts an env key as a headless escape hatch; a dashboard
+    # connection always wins when both exist.
+    if [ -n "${KEY_GEMINI:-}" ]; then
+      echo "GEMINI_API_KEY=${KEY_GEMINI}"
+      echo "GOOGLE_API_KEY=${KEY_GEMINI}"
+    fi
+  } > "${OMNI_ENV_FILE}.tmp"
+  chmod 600 "${OMNI_ENV_FILE}.tmp"
+  mv -f "${OMNI_ENV_FILE}.tmp" "$OMNI_ENV_FILE"
+  OMNI_INITIAL_PASSWORD="$pass"
+  log_ok "       Environment written (mode 600; only claude-freeagents is advertised"
+  log_ok "       to Claude Code model discovery - the claude/* alias mirror stays off)."
+}
+
+write_omni_launcher() {
+  ensure_state_dirs
+  local omni_bin
+  omni_bin="$(command -v omniroute 2>/dev/null || true)"
+  [ -n "$omni_bin" ] || omni_bin="/usr/local/bin/omniroute"
   {
     echo '#!/usr/bin/env bash'
-    echo '# Auto-generated by setup.sh - starts Docker and the litellm container at WSL boot.'
-    echo 'LOG="${TMPDIR:-/tmp}/litellm-boot.log"'
+    echo '# Auto-generated by setup.sh - OmniRoute launcher (official npm package).'
+    echo 'set -u'
+    echo 'export PATH="/usr/local/bin:/usr/bin:/bin:${HOME}/.local/bin:${PATH}"'
+    echo '[ -f "${HOME}/.profile" ] && . "${HOME}/.profile" 2>/dev/null || true'
+    echo 'set -a'
+    echo ". \"${OMNI_ENV_FILE}\""
+    echo 'set +a'
+    echo "export DATA_DIR=\"${OMNI_DATA_DIR}\""
+    echo "export OMNI_ENV_FILE=\"${OMNI_ENV_FILE}\""
+    echo "export PORT=\"${OMNI_PORT}\""
+    echo "exec ${omni_bin} serve >> \"${OMNI_LOG_FILE}\" 2>&1"
+  } > "${OMNI_LAUNCHER}.tmp"
+  chmod 700 "${OMNI_LAUNCHER}.tmp"
+  mv -f "${OMNI_LAUNCHER}.tmp" "$OMNI_LAUNCHER"
+}
+
+use_systemd() {
+  case "${FREEAGENTS_BOOT_MODE:-auto}" in
+    systemd) return 0 ;;
+    wslconf) return 1 ;;
+    *) [ -d /run/systemd/system ] && have systemctl && return 0 ;;
+  esac
+  return 1
+}
+
+write_omni_systemd_unit() {
+  printf '%s\n' \
+    '[Unit]' \
+    'Description=OmniRoute gateway (Free AI Agents)' \
+    'After=network-online.target' \
+    'Wants=network-online.target' \
+    '' \
+    '[Service]' \
+    'Type=simple' \
+    "User=$(id -un)" \
+    "ExecStart=${OMNI_LAUNCHER}" \
+    'Restart=on-failure' \
+    'RestartSec=5' \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target' \
+    | $SUDO tee "$SYSTEMD_UNIT_OMNI" >/dev/null
+  chmod 700 "$OMNI_LAUNCHER" 2>/dev/null || true
+  $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+  $SUDO systemctl enable omniroute.service >/dev/null 2>&1 || true
+}
+
+omni_pid_alive() {
+  local pid=""
+  pid="$(read_secret "$OMNI_PID_FILE")"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+omni_process_running() {
+  if have pgrep && pgrep -f "omniroute serve" >/dev/null 2>&1; then return 0; fi
+  omni_pid_alive
+}
+
+start_omni_service() {
+  write_omni_launcher
+  if use_systemd; then
+    write_omni_systemd_unit
+    $SUDO systemctl restart omniroute.service >/dev/null 2>&1 || \
+      $SUDO systemctl start omniroute.service >/dev/null 2>&1 || true
+    sleep 2
+    if omni_process_running; then
+      log_ok "       OmniRoute started (systemd: omniroute.service)."
+      return 0
+    fi
+    log_warn "       systemd could not start OmniRoute - falling back to a background process."
+  fi
+  if omni_process_running; then
+    log_ok "       OmniRoute is already running."
+    return 0
+  fi
+  ensure_state_dirs
+  : >> "$OMNI_LOG_FILE" 2>/dev/null || true
+  nohup "$OMNI_LAUNCHER" >/dev/null 2>&1 &
+  echo $! > "$OMNI_PID_FILE"
+  chmod 600 "$OMNI_PID_FILE" 2>/dev/null || true
+  log_ok "       OmniRoute started in the background (log: ${OMNI_LOG_FILE})."
+  return 0
+}
+
+stop_omni_service() {
+  local stopped=0
+  if use_systemd && [ -f "$SYSTEMD_UNIT_OMNI" ]; then
+    if $SUDO systemctl stop omniroute.service >/dev/null 2>&1; then stopped=1; fi
+  fi
+  local pid=""
+  pid="$(read_secret "$OMNI_PID_FILE")"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$pid" 2>/dev/null || true
+    stopped=1
+  fi
+  if have pkill; then
+    pkill -f "omniroute serve" >/dev/null 2>&1 && stopped=1 || true
+  fi
+  rm -f "$OMNI_PID_FILE" 2>/dev/null || true
+  if [ "$stopped" -eq 1 ]; then log_ok "       OmniRoute stopped."; else log_info "       OmniRoute was not running."; fi
+  return 0
+}
+
+omni_health_code() {
+  if have curl; then
+    curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$(omni_base_url)/healthz" 2>/dev/null || true
+  else
+    echo "n/a"
+  fi
+}
+
+wait_for_omni() {
+  local max_iters="${OMNIROUTE_HEALTH_WAIT_SEC:-120}"
+  is_number "$max_iters" || max_iters=120
+  max_iters=$(( (max_iters + 1) / 2 ))
+  log_info "       Waiting for OmniRoute to become healthy (up to $((max_iters * 2))s)..."
+  local i code
+  for i in $(seq 1 "$max_iters"); do
+    code="$(omni_health_code)"
+    if [ "$code" = "200" ] || [ "$code" = "204" ]; then
+      log_ok "OmniRoute is healthy: $(omni_base_url)"
+      return 0
+    fi
+    sleep 2
+  done
+  log_warn "OmniRoute health check timed out ($(omni_base_url)/healthz)."
+  if [ -f "$OMNI_LOG_FILE" ]; then
+    log_warn "Last log lines (${OMNI_LOG_FILE}):"
+    tail -n 5 "$OMNI_LOG_FILE" | sed 's/^/         /' || true
+  fi
+  return 0
+}
+
+omni_installed() { [ -f "$OMNI_ENV_FILE" ] || have omniroute; }
+
+#-------------------------------------------------------------------------------
+# Management API helpers
+#   the login cookie (auth_token) authorises every /api/* management route
+#-------------------------------------------------------------------------------
+OMNI_JAR=""
+OMNI_JSON=""
+OMNI_HTTP=""
+
+omni_api() { # $1 method $2 path [$3 json body]
+  local method="$1" path="$2" body="${3:-}" out
+  local -a args=(-sS --max-time 60 -o - -w '\n%{http_code}')
+  # read AND write the session cookie jar (login stores auth_token here)
+  [ -n "$OMNI_JAR" ] && args+=(-b "$OMNI_JAR" -c "$OMNI_JAR")
+  if [ -n "$body" ]; then
+    args+=(-X "$method" -H 'Content-Type: application/json' --data-binary "$body")
+  else
+    args+=(-X "$method")
+  fi
+  out="$(curl "${args[@]}" "$(omni_base_url)${path}" 2>/dev/null || true)"
+  OMNI_HTTP="$(printf '%s' "$out" | tail -n1)"
+  OMNI_JSON="$(printf '%s' "$out" | sed '$d')"
+  case "$OMNI_HTTP" in 2*) return 0 ;; *) return 1 ;; esac
+}
+
+# Evaluate a small python expression over the last JSON response.
+# Namespace: d (raw), conns, combos, keys, items, a0, a1
+#   omni_json_get "$json" "next((c['id'] for c in conns if c['name']==a0), '')" "NAME"
+OMNI_JSON_EVAL_PY="$(cat <<'PYEOF'
+import json, os, sys
+
+raw = sys.stdin.read()
+expr = os.environ.get("OMNI_EXPR") or ""
+a0 = os.environ.get("OMNI_A0") or ""
+a1 = os.environ.get("OMNI_A1") or ""
+if not expr:
+    raise SystemExit(0)
+
+try:
+    d = json.loads(raw)
+except Exception:
+    raise SystemExit(0)
+
+
+def as_list(*keys):
+    if isinstance(d, list):
+        return d
+    if isinstance(d, dict):
+        for key in keys:
+            value = d.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+ns = {
+    "d": d,
+    "a0": a0,
+    "a1": a1,
+    "args": [a0, a1],
+    "conns": as_list("connections", "providers"),
+    "combos": as_list("combos"),
+    "keys": as_list("keys", "api_keys"),
+    "items": d if isinstance(d, list) else [],
+}
+safe_builtins = {
+    "next": next, "str": str, "int": int, "len": len, "any": any, "all": all,
+    "sorted": sorted, "isinstance": isinstance, "list": list, "set": set,
+    "min": min, "max": max, "float": float, "bool": bool, "enumerate": enumerate,
+}
+# A single (globals) namespace: names must stay visible inside generator
+# expressions and comprehensions of the evaluated snippet.
+scope = dict(ns)
+scope["__builtins__"] = safe_builtins
+try:
+    value = eval(expr, scope)  # noqa: S307 - fixed local source
+except Exception:
+    value = ""
+print("" if value is None else value)
+PYEOF
+)"
+
+omni_json_get() { # $1 json  $2 python expression  [$3 arg0] [$4 arg1]
+  local json="${1:-}"
+  [ -n "$json" ] || return 0
+  printf '%s' "$json" | OMNI_EXPR="${2:-}" OMNI_A0="${3:-}" OMNI_A1="${4:-}" \
+    python3 -c "$OMNI_JSON_EVAL_PY" 2>/dev/null || true
+}
+
+omni_login() {
+  local body
+  rm -f "$OMNI_JAR" 2>/dev/null || true
+  OMNI_JAR="$(mktemp /tmp/fa-omni-jar.XXXXXX)"
+  chmod 600 "$OMNI_JAR" 2>/dev/null || true
+  body="$(python3 -c 'import json,sys; print(json.dumps({"password": sys.argv[1]}))' "$OMNI_INITIAL_PASSWORD")"
+  if omni_api POST /api/auth/login "$body"; then
+    log_ok "       Dashboard login OK (session cookie stored)."
+    return 0
+  fi
+  rm -f "$OMNI_JAR" 2>/dev/null || true
+  OMNI_JAR=""
+  log_warn "       Dashboard login failed (HTTP ${OMNI_HTTP:-none}). Provider keys and the"
+  log_warn "       model combo must be added manually in the dashboard: $(omni_base_url)"
+  return 1
+}
+
+# LiteLLM provider id -> OmniRoute provider id ('' = not a native OmniRoute
+# API-key provider, e.g. GitHub Models; it can be added from the dashboard).
+omni_provider_id() {
+  case "${1:-}" in
+    groq|openrouter|gemini|cerebras|mistral|sambanova) printf '%s' "$1" ;;
+    nvidia_nim)  printf 'nvidia' ;;
+    together_ai) printf 'together' ;;
+    *) printf '' ;;
+  esac
+}
+
+# POST /api/providers is an UPSERT keyed on (provider, name): re-running the
+# installer updates the managed connection instead of duplicating it.
+omni_upsert_provider() { # $1 provider id  $2 api key
+  local provider="$1" key="$2" target body
+  target="$(omni_provider_id "$provider")"
+  if [ -z "$target" ]; then
+    log_warn "       $(provider_label "$provider"): not available as an OmniRoute API-key"
+    log_warn "         provider - skipping it for OmniRoute (add it in the dashboard if needed)."
+    return 1
+  fi
+  body="$(python3 -c 'import json,sys; print(json.dumps({"provider": sys.argv[1], "name": sys.argv[2], "apiKey": sys.argv[3], "isActive": True}))' \
+    "$target" "$OMNI_CONN_NAME" "$key")"
+  if omni_api POST /api/providers "$body"; then
+    log_ok "       $(provider_label "$provider"): connection '${OMNI_CONN_NAME}' saved."
+    return 0
+  fi
+  log_warn "       $(provider_label "$provider"): saving the connection failed (HTTP ${OMNI_HTTP:-none}): $(snippet "$OMNI_JSON")"
+  return 1
+}
+
+# Remove connections/combos created by the two older per-gateway scripts so
+# they cannot shadow the managed ones.
+omni_cleanup_legacy() {
+  local ids id
+  if omni_api GET /api/providers; then
+    ids="$(omni_json_get "$OMNI_JSON" "\"\n\".join(str(c.get('id')) for c in conns if str(c.get('name','')) in ('ws-install','omniroute-install','litellm-install'))")"
+    for id in $ids; do
+      [ -n "$id" ] || continue
+      if omni_api DELETE "/api/providers/${id}"; then
+        log_info "       Removed a leftover provider connection from the previous installer."
+      fi
+    done
+  fi
+  if omni_api GET /api/combos; then
+    ids="$(omni_json_get "$OMNI_JSON" "\"\n\".join(str(c.get('id')) for c in combos if str(c.get('name','')) in ('ws-claude','freeagents'))")"
+    for id in $ids; do
+      [ -n "$id" ] || continue
+      if omni_api DELETE "/api/combos/${id}"; then
+        log_info "       Removed a leftover routing combo from the previous installer."
+      fi
+    done
+  fi
+  return 0
+}
+
+# Managed connections that are no longer part of the current key set are
+# removed, so re-entering tokens really replaces the old provider set (only
+# connections created by THIS installer are touched).
+omni_prune_connections() { # $1 comma-separated list of provider ids to keep
+  local keep="$1" ids id
+  omni_api GET /api/providers || return 0
+  ids="$(omni_json_get "$OMNI_JSON" \
+    "\"\\n\".join(str(c.get('id')) for c in conns if str(c.get('name','')) == a0 and str(c.get('provider','')) not in a1.split(','))" \
+    "$OMNI_CONN_NAME" "$keep")"
+  for id in $ids; do
+    [ -n "$id" ] || continue
+    if omni_api DELETE "/api/providers/${id}"; then
+      log_info "       Removed a managed connection that is no longer configured."
+    fi
+  done
+  return 0
+}
+
+# The managed client API key. POST is NOT idempotent (a second POST with the
+# same name creates another key), so duplicates are pruned and the stored value
+# is reused whenever possible.
+omni_ensure_client_key() {
+  OMNI_CLIENT_KEY="$(read_secret "$OMNI_CLIENT_KEY_FILE")"
+  local ids=""
+  if omni_api GET /api/keys; then
+    ids="$(omni_json_get "$OMNI_JSON" \
+      "\"\n\".join(str(k.get('id')) for k in sorted(keys, key=lambda x: str(x.get('createdAt') or '')) if str(k.get('name','')) == a0)" \
+      "$OMNI_KEY_LABEL")"
+  else
+    log_warn "       Could not list the existing API keys (HTTP ${OMNI_HTTP:-none})."
+  fi
+
+  if [ -n "$OMNI_CLIENT_KEY" ] && [ -n "$ids" ]; then
+    # keep the newest managed key, drop any duplicates created by older runs
+    local -a list=()
+    local id keep
+    mapfile -t list <<< "$ids"
+    keep="${list[$((${#list[@]} - 1))]}"
+    for id in "${list[@]}"; do
+      [ "$id" = "$keep" ] && continue
+      omni_api DELETE "/api/keys/${id}" >/dev/null 2>&1 || true
+      log_info "       Removed a duplicate managed API key."
+    done
+    log_ok "       Reusing the stored managed API key."
+    return 0
+  fi
+
+  if [ -z "$OMNI_CLIENT_KEY" ]; then
+    # no usable local value: drop every managed key and create a fresh one
+    local id
+    for id in $ids; do
+      omni_api DELETE "/api/keys/${id}" >/dev/null 2>&1 || true
+    done
+  fi
+
+  local body
+  body="$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "label": sys.argv[1]}))' "$OMNI_KEY_LABEL")"
+  if omni_api POST /api/keys "$body"; then
+    OMNI_CLIENT_KEY="$(omni_json_get "$OMNI_JSON" "d.get('key') or (d.get('data') or {}).get('key') or ''")"
+  fi
+  if [ -z "$OMNI_CLIENT_KEY" ]; then
+    OMNI_CLIENT_KEY="$(read_secret "$OMNI_MASTER_KEY_FILE")"
+    if [ -n "$OMNI_CLIENT_KEY" ]; then
+      log_warn "       Could not create a client key - falling back to the master key."
+    else
+      log_warn "       No client key available; create one in the dashboard: $(omni_base_url)"
+    fi
+    return 0
+  fi
+  ensure_state_dirs
+  printf '%s\n' "$OMNI_CLIENT_KEY" > "${OMNI_CLIENT_KEY_FILE}.tmp"
+  chmod 600 "${OMNI_CLIENT_KEY_FILE}.tmp"
+  mv -f "${OMNI_CLIENT_KEY_FILE}.tmp" "$OMNI_CLIENT_KEY_FILE"
+  log_ok "       Managed client API key created (${OMNI_CLIENT_KEY_FILE})."
+  return 0
+}
+
+# Live model ids for the configured providers, straight from the official
+# catalog endpoint: only chat models that support tool calling are used, and
+# coding-friendly families are ranked first.
+omni_catalog_refs() {
+  local p target tmp="" provs=()
+  for p in $(configured_providers); do
+    target="$(omni_provider_id "$p")"
+    [ -n "$target" ] && provs+=("$target")
+  done
+  [ "${#provs[@]}" -gt 0 ] || return 1
+  omni_api GET /api/models/catalog || return 1
+  [ -n "$OMNI_JSON" ] || return 1
+  tmp="$(mktemp /tmp/fa-omni-catalog.XXXXXX.json)"
+  printf '%s' "$OMNI_JSON" > "$tmp"
+  OMNIROUTE_MODELS_PER_PROVIDER="${OMNIROUTE_MODELS_PER_PROVIDER:-3}" \
+    python3 - "$tmp" "${provs[@]}" <<'PYEOF'
+import json, os, sys
+
+path, wanted = sys.argv[1], sys.argv[2:]
+try:
+    catalog = (json.load(open(path, encoding="utf-8")) or {}).get("catalog") or {}
+except Exception:
+    raise SystemExit(0)
+
+def _int(value, default):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+limit = max(1, _int(os.environ.get("OMNIROUTE_MODELS_PER_PROVIDER"), 3))
+PREFER = ("coder", "devstral", "gpt-oss", "qwen3", "deepseek", "glm", "llama-3.3",
+          "mistral", "gemini-", "minimax", "kimi")
+SKIP = ("embed", "whisper", "tts", "audio", "image", "rerank", "moderation",
+        "vision-encoder", "guard")
+
+def rank(model_id):
+    low = model_id.lower()
+    if any(token in low for token in SKIP):
+        return 99
+    for index, token in enumerate(PREFER):
+        if token in low:
+            return index
+    return len(PREFER)
+
+refs = []
+for provider in wanted:
+    entry = catalog.get(provider) or {}
+    models = [m for m in (entry.get("models") or [])
+              if str(m.get("type")) == "chat" and (m.get("capabilities") or {}).get("tool_calling")]
+    models.sort(key=lambda m: rank(str(m.get("id") or "")))
+    for model in models[:limit]:
+        model_id = str(model.get("id") or "")
+        if model_id:
+            refs.append(model_id)
+
+for ref in refs[:24]:
+    print(ref)
+PYEOF
+  rm -f "$tmp" 2>/dev/null || true
+  return 0
+}
+
+# The ONE model Claude sees from OmniRoute: a combo named $MODEL_ID.
+omni_ensure_combo() {
+  local line refs_json body id="" strategy="${OMNIROUTE_COMBO_STRATEGY:-auto}"
+  local -a refs=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && refs+=("$line")
+  done < <(omni_catalog_refs)
+  if [ "${#refs[@]}" -eq 0 ]; then
+    log_warn "       Could not read the OmniRoute model catalog - the existing combo is kept."
+    return 1
+  fi
+  refs_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${refs[@]}")"
+  body="$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "models": json.loads(sys.argv[2]), "strategy": sys.argv[3]}))' \
+    "$MODEL_ID" "$refs_json" "$strategy")"
+
+  omni_api GET /api/combos || true
+  id="$(omni_json_get "$OMNI_JSON" "next((str(c.get('id')) for c in combos if str(c.get('name')) == a0), '')" "$MODEL_ID")"
+  if [ -n "$id" ]; then
+    if omni_api PUT "/api/combos/${id}" "$body"; then
+      log_ok "       Routing combo '${MODEL_ID}' updated (${#refs[@]} model refs, strategy ${strategy})."
+      return 0
+    fi
+    log_warn "       Combo update failed (HTTP ${OMNI_HTTP:-none}): $(snippet "$OMNI_JSON")"
+    return 1
+  fi
+  if omni_api POST /api/combos "$body"; then
+    log_ok "       Routing combo '${MODEL_ID}' created (${#refs[@]} model refs, strategy ${strategy})."
+    return 0
+  fi
+  log_warn "       Combo creation failed (HTTP ${OMNI_HTTP:-none}): $(snippet "$OMNI_JSON")"
+  return 1
+}
+
+#-------------------------------------------------------------------------------
+# Full OmniRoute configuration flow
+#-------------------------------------------------------------------------------
+configure_omniroute() {
+  log_info "Configuring OmniRoute (connections, client key, single model combo)..."
+
+  ensure_state_dirs
+  if [ ! -s "$OMNI_MASTER_KEY_FILE" ]; then
+    omni_strong_secret "" 24 > "${OMNI_MASTER_KEY_FILE}.tmp"
+    chmod 600 "${OMNI_MASTER_KEY_FILE}.tmp"
+    mv -f "${OMNI_MASTER_KEY_FILE}.tmp" "$OMNI_MASTER_KEY_FILE"
+  fi
+  OMNI_MASTER_KEY="$(read_secret "$OMNI_MASTER_KEY_FILE")"
+
+  if ! omni_login; then
+    OMNI_CLIENT_KEY="$OMNI_MASTER_KEY"
+    return 0
+  fi
+
+  omni_cleanup_legacy
+
+  local p k configured=0 skipped=0
+  for p in $(configured_providers); do
+    k="$(provider_key "$p")"
+    if omni_upsert_provider "$p" "$k"; then
+      configured=$((configured + 1))
+    else
+      skipped=$((skipped + 1))
+    fi
+  done
+  log_ok "       Provider connections: ${configured} saved, ${skipped} skipped."
+  local keep="" pp kk
+  for pp in $(configured_providers); do
+    kk="$(omni_provider_id "$pp")"
+    [ -n "$kk" ] && keep="${keep:+${keep},}${kk}"
+  done
+  [ -n "$keep" ] && omni_prune_connections "$keep"
+
+  omni_ensure_client_key
+  omni_ensure_combo || true
+
+  rm -f "$OMNI_JAR" 2>/dev/null || true
+  OMNI_JAR=""
+  return 0
+}
+
+# Verify the OmniRoute surface that Claude Code actually uses.
+omni_verify() {
+  local token="${OMNI_CLIENT_KEY:-${OMNI_MASTER_KEY:-}}"
+  have curl || return 0
+
+  local code found
+  code="$(curl -s -o /tmp/fa-omni-models.$$ -w '%{http_code}' --max-time 15 \
+    -H "Authorization: Bearer ${token}" "$(omni_base_url)/v1/models" 2>/dev/null || true)"
+  if [ "$code" = "200" ]; then
+    found="$(grep -c "\"${MODEL_ID}\"" /tmp/fa-omni-models.$$ 2>/dev/null || true)"
+    if [ "${found:-0}" -ge 1 ]; then
+      log_ok "       /v1/models lists '${MODEL_ID}' (the only claude* id Claude Code shows)."
+    else
+      log_warn "       /v1/models answered 200 but '${MODEL_ID}' was not listed - check the combo."
+    fi
+  else
+    log_warn "       /v1/models answered ${code:-none} (check the log: ${OMNI_LOG_FILE})."
+  fi
+  rm -f /tmp/fa-omni-models.$$ 2>/dev/null || true
+
+  local code2
+  code2="$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
+    -H "Authorization: Bearer ${token}" -H 'anthropic-version: 2023-06-01' \
+    -H 'Content-Type: application/json' \
+    -X POST "$(omni_base_url)/v1/messages" \
+    -d "{\"model\":\"${MODEL_ID}\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" 2>/dev/null || true)"
+  case "$code2" in
+    200) log_ok "       Anthropic endpoint /v1/messages answered 200 for ${MODEL_ID}." ;;
+    000|'') log_warn "       /v1/messages could not be reached (network/block)." ;;
+    *) log_warn "       /v1/messages answered HTTP ${code2} (a provider-side error is normal here"
+       log_warn "       when the live provider call is blocked; routing itself is configured)." ;;
+  esac
+  return 0
+}
+
+#===============================================================================
+# Claude integration
+#   - Claude Code: %USERPROFILE%\.claude\settings.json  (deep merge, env block)
+#   - Claude Desktop: %LOCALAPPDATA%\Claude-3p\configLibrary\<uuid>.json
+#       one profile per gateway, labeled FreeAgents/LiteLLM or FreeAgents/Omni
+#===============================================================================
+active_gateway() {
+  local g=""
+  g="$(read_secret "$ACTIVE_GATEWAY_FILE")"
+  case "$g" in litellm|omniroute) printf '%s' "$g" ;; *) printf 'litellm' ;; esac
+}
+
+set_active_gateway() { # $1 litellm|omniroute
+  ensure_state_dirs
+  printf '%s\n' "$1" > "${ACTIVE_GATEWAY_FILE}.tmp"
+  mv -f "${ACTIVE_GATEWAY_FILE}.tmp" "$ACTIVE_GATEWAY_FILE"
+  log_ok "Active gateway for Claude: $1"
+}
+
+gateway_port() { case "$1" in omniroute) printf '%s' "$OMNI_PORT" ;; *) printf '%s' "$LITELLM_PORT" ;; esac; }
+gateway_label() { case "$1" in omniroute) printf '%s' "$LABEL_OMNI" ;; *) printf '%s' "$LABEL_LITELLM" ;; esac; }
+
+# The key Claude must present to the active gateway
+gateway_claude_token() { # $1 gateway
+  case "$1" in
+    omniroute)
+      local k; k="$(read_secret "$OMNI_CLIENT_KEY_FILE")"
+      [ -n "$k" ] || k="$(read_secret "$OMNI_MASTER_KEY_FILE")"
+      printf '%s' "$k"
+      ;;
+    *)
+      read_secret "$LITELLM_KEYFILE"
+      ;;
+  esac
+}
+
+merge_claude_settings() { # $1 target path $2 base_url $3 token $4 model_id
+  local target="$1" base="$2" token="$3" model="$4" dir
+  dir="$(dirname "$target")"
+  mkdir -p "$dir"
+  if have python3; then
+    FA_SETTINGS="$target" FA_BASE="$base" FA_TOKEN="$token" FA_MODEL="$model" FA_COMPACT="$AUTO_COMPACT_WINDOW" python3 - <<'PYEOF'
+import json, os, sys
+
+path = os.environ["FA_SETTINGS"]
+base = os.environ["FA_BASE"]
+token = os.environ["FA_TOKEN"]
+model = os.environ["FA_MODEL"]
+compact = os.environ.get("FA_COMPACT") or ""
+
+data = {}
+if os.path.exists(path):
+    raw = open(path, encoding="utf-8").read().strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            # keep the broken file - the caller already made a timestamped backup
+            data = {}
+if not isinstance(data, dict):
+    data = {}
+
+env = data.get("env")
+if not isinstance(env, dict):
+    env = {}
+
+env["ANTHROPIC_BASE_URL"] = base
+env["ANTHROPIC_AUTH_TOKEN"] = token
+env.pop("ANTHROPIC_API_KEY", None)          # bearer token only: no double credential
+env["ANTHROPIC_MODEL"] = model
+env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
+if compact:
+    # The gateway can route to providers with a smaller window than the default
+    # 200k assumption, so tell Claude Code when to auto-compact.
+    env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = compact
+
+data["env"] = env
+data["model"] = model
+if "hasCompletedOnboarding" not in data:
+    data["hasCompletedOnboarding"] = True
+data.setdefault("$schema", "https://json.schemastore.org/claude-code-settings.json")
+
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+os.replace(tmp, path)
+print("merged")
+PYEOF
+    chmod 600 "$target" 2>/dev/null || true
+    return 0
+  fi
+  # No python3: never clobber an existing file, write only when it is absent.
+  if [ -s "$target" ]; then
+    log_warn "       python3 is not available - leaving the existing ${target} untouched."
+    return 1
+  fi
+  cat > "$target" <<EOF
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "${base}",
+    "ANTHROPIC_AUTH_TOKEN": "${token}",
+    "ANTHROPIC_MODEL": "${model}",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "${model}",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "${model}",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${model}",
+    "ANTHROPIC_SMALL_FAST_MODEL": "${model}",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "${AUTO_COMPACT_WINDOW}"
+  }
+}
+EOF
+  chmod 600 "$target" 2>/dev/null || true
+  return 0
+}
+
+configure_claude_code() {
+  local gw="$1"
+  if ! windows_integration_available; then
+    log_warn "       Claude Code settings skipped (no Windows integration)."
+    return 0
+  fi
+  local win_home target token port base
+  win_home="$(get_windows_home)" || { log_warn "       Could not resolve the Windows profile."; return 0; }
+  [ -d "$win_home" ] || { log_warn "       Windows profile path does not exist: ${win_home}"; return 0; }
+  target="${win_home}/.claude/settings.json"
+  port="$(gateway_port "$gw")"
+  base="http://127.0.0.1:${port}"
+  token="$(gateway_claude_token "$gw")"
+  if [ -z "$token" ]; then
+    log_warn "       No API token for '${gw}' yet - Claude Code settings not written."
+    return 0
+  fi
+  mkdir -p "$(dirname "$target")"
+  if [ -f "$target" ]; then
+    cp "$target" "${target}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+  fi
+  if merge_claude_settings "$target" "$base" "$token" "$MODEL_ID"; then
+    log_ok "       Claude Code settings written: ${target}"
+    log_ok "       Gateway: ${base}  |  model: ${MODEL_ID}  ($(gateway_label "$gw"))"
+  fi
+}
+
+write_desktop_profile() { # $1 gateway
+  local gw="$1" root lib profile meta deskcfg pid label token port base
+  windows_integration_available || { log_warn "       Claude Desktop profile skipped (no Windows integration)."; return 0; }
+  local local_app
+  local_app="$(get_windows_localappdata 2>/dev/null || true)"
+  if [ -z "$local_app" ]; then
+    local wh; wh="$(get_windows_home 2>/dev/null || true)"
+    [ -n "$wh" ] && local_app="${wh}/AppData/Local"
+  fi
+  [ -n "$local_app" ] || { log_warn "       Could not locate %LOCALAPPDATA%."; return 0; }
+
+  case "$gw" in
+    omniroute) pid="$DESKTOP_PROFILE_ID_OMNI"    ;;
+    *)         pid="$DESKTOP_PROFILE_ID_LITELLM" ;;
+  esac
+  label="$(gateway_label "$gw")"
+  port="$(gateway_port "$gw")"
+  base="http://127.0.0.1:${port}"
+  token="$(gateway_claude_token "$gw")"
+  if [ -z "$token" ]; then
+    log_warn "       No API token for '${gw}' yet - desktop profile not written."
+    return 0
+  fi
+  root="${local_app}/Claude-3p"
+  lib="${root}/configLibrary"
+  profile="${lib}/${pid}.json"
+  meta="${lib}/_meta.json"
+  deskcfg="${root}/claude_desktop_config.json"
+  mkdir -p "$lib" 2>/dev/null || { log_warn "       Cannot create ${lib}"; return 0; }
+
+  FA_DESK_PROFILE="$profile" FA_BASE="$base" FA_TOKEN="$token" FA_LABEL="$label" FA_MODEL="$MODEL_ID" \
+  FA_CATALOG="$CATALOG_MODEL_ID" python3 - <<'PYEOF'
+import json, os
+profile = os.environ["FA_DESK_PROFILE"]
+base = os.environ["FA_BASE"]
+token = os.environ["FA_TOKEN"]
+label = os.environ["FA_LABEL"]
+model = os.environ["FA_MODEL"]
+catalog = os.environ["FA_CATALOG"]
+
+models = [{"name": catalog, "labelOverride": label, "isFamilyDefault": True}]
+if model != catalog:
+    models.append({"name": model, "labelOverride": label + " (auto)"})
+
+data = {
+    "inferenceProvider": "gateway",
+    "inferenceCredentialKind": "static",
+    "inferenceGatewayBaseUrl": base,
+    "inferenceGatewayApiKey": token,
+    "inferenceGatewayAuthScheme": "bearer",
+    "modelDiscoveryEnabled": True,
+    "chatTabEnabled": True,
+    "disableEssentialTelemetry": True,
+    "disableNonessentialTelemetry": True,
+    "inferenceModels": models,
+}
+tmp = profile + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+os.replace(tmp, profile)
+PYEOF
+  chmod 600 "$profile" 2>/dev/null || true
+
+  FA_META="$meta" FA_PID="$pid" FA_NAME="Free Agents" python3 - <<'PYEOF'
+import json, os
+path = os.environ["FA_META"]
+pid = os.environ["FA_PID"]
+name = os.environ["FA_NAME"]
+meta = {"appliedId": pid, "entries": []}
+if os.path.exists(path):
+    try:
+        meta = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        meta = {"appliedId": pid, "entries": []}
+entries = [e for e in (meta.get("entries") or []) if e.get("id") != pid]
+entries.append({"id": pid, "name": name})
+meta["entries"] = entries
+known = {e.get("id") for e in entries}
+cur = meta.get("appliedId")
+if cur not in known or not cur:
+    meta["appliedId"] = pid
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(meta, fh, indent=2)
+    fh.write("\n")
+os.replace(tmp, path)
+PYEOF
+  chmod 600 "$meta" 2>/dev/null || true
+
+  if [ -f "$deskcfg" ] && python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$deskcfg" 2>/dev/null; then
+    FA_DESKCFG="$deskcfg" python3 - <<'PYEOF'
+import json, os
+path = os.environ["FA_DESKCFG"]
+data = json.load(open(path, encoding="utf-8"))
+data["deploymentMode"] = "3p"
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+os.replace(tmp, path)
+PYEOF
+  else
+    printf '{\n  "deploymentMode": "3p"\n}\n' > "$deskcfg" 2>/dev/null || true
+  fi
+  chmod 600 "$deskcfg" 2>/dev/null || true
+  log_ok "       Claude Desktop profile written: ${profile} (label: ${label})"
+}
+
+configure_claude_all() { # $1 gateway (active) - writes code settings + both profiles
+  local gw="$1"
+  configure_claude_code "$gw"
+  local e
+  for e in litellm omniroute; do
+    local installed=0
+    [ "$e" = "litellm" ] && litellm_installed && installed=1
+    [ "$e" = "omniroute" ] && omni_installed && installed=1
+    [ "$installed" -eq 1 ] && write_desktop_profile "$e"
+  done
+  return 0
+}
+
+#-------------------------------------------------------------------------------
+# Auto-start on WSL boot (systemd units or a single /etc/wsl.conf boot command)
+#-------------------------------------------------------------------------------
+write_boot_helper() {
+  $SUDO mkdir -p "$(dirname "$BOOT_HELPER")" 2>/dev/null || true
+  {
+    echo '#!/usr/bin/env bash'
+    echo '# Auto-generated by setup.sh - starts Docker and both gateways at WSL boot.'
+    echo 'LOG="${TMPDIR:-/tmp}/freeagents-boot.log"'
     echo '{'
     echo '  if [ "$(id -u)" -eq 0 ]; then S=""; else S="sudo"; fi'
     echo '  $S service docker start >/dev/null 2>&1 || true'
@@ -965,1290 +2127,674 @@ write_boot_helper() {
     echo '  if $S docker ps -a --format "{{.Names}}" 2>/dev/null | grep -qx litellm; then'
     echo '    $S docker start litellm >/dev/null 2>&1 || true'
     echo '  fi'
+    echo '  if command -v omniroute >/dev/null 2>&1; then'
+    echo "    if [ -f \"${OMNI_LAUNCHER}\" ]; then"
+    echo "      pgrep -f 'omniroute serve' >/dev/null 2>&1 || nohup \"${OMNI_LAUNCHER}\" >/dev/null 2>&1 &"
+    echo '    fi'
+    echo '  fi'
     echo '} >>"$LOG" 2>&1'
-  } | $SUDO tee "$BOOT_HELPER" >/dev/null
+  } | $SUDO tee "${BOOT_HELPER}.tmp" >/dev/null
+  $SUDO mv -f "${BOOT_HELPER}.tmp" "$BOOT_HELPER"
   $SUDO chmod 755 "$BOOT_HELPER"
 }
 
+write_litellm_systemd_unit() {
+  $SUDO mkdir -p "$(dirname "$SYSTEMD_UNIT_LITELLM")" 2>/dev/null || true
+  printf '%s\n' \
+    '[Unit]' \
+    'Description=LiteLLM proxy container (Free AI Agents)' \
+    'After=docker.service' \
+    'Requires=docker.service' \
+    '' \
+    '[Service]' \
+    'Type=oneshot' \
+    'RemainAfterExit=yes' \
+    "ExecStart=${BOOT_HELPER}" \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target' \
+    | $SUDO tee "$SYSTEMD_UNIT_LITELLM" >/dev/null
+}
+
+configure_autostart() { # $1 gateway that needs the boot path
+  log_info "Setting up auto-start on boot..."
+  write_boot_helper
+  if use_systemd; then
+    $SUDO mkdir -p /etc/systemd/system
+    if litellm_installed; then
+      write_litellm_systemd_unit
+      $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+      $SUDO systemctl enable litellm.service >/dev/null 2>&1 || true
+    fi
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    AUTOSTART_MODE="systemd units (freeagents boot helper / omniroute.service)"
+    log_ok "Auto-start on WSL boot: ${AUTOSTART_MODE}"
+    return 0
+  fi
+  # No systemd: a single boot command starts everything
+  if ! $SUDO test -f "$WSL_CONF"; then
+    printf '' | $SUDO tee "$WSL_CONF" >/dev/null
+  fi
+  if $SUDO grep -qF "$BOOT_LINE" "$WSL_CONF" 2>/dev/null; then
+    log_ok "       Boot entry already present in ${WSL_CONF}."
+  elif $SUDO grep -qE '^[[:space:]]*command[[:space:]]*=' "$WSL_CONF" 2>/dev/null; then
+    log_warn "       ${WSL_CONF} already defines a custom boot command - add this line under [boot] manually:"
+    log_warn "         ${BOOT_LINE}"
+  else
+    if $SUDO grep -qE '^[[:space:]]*\[boot\]' "$WSL_CONF" 2>/dev/null; then
+      $SUDO sed -i "/^[[:space:]]*\[boot\]/a ${BOOT_LINE}" "$WSL_CONF"
+    else
+      printf '\n[boot]\n%s\n' "$BOOT_LINE" | $SUDO tee -a "$WSL_CONF" >/dev/null
+    fi
+    log_ok "       Boot command added to ${WSL_CONF}."
+  fi
+  AUTOSTART_MODE="/etc/wsl.conf boot command (no systemd detected)"
+  log_ok "Auto-start on WSL boot: ${AUTOSTART_MODE}"
+}
+
+#-------------------------------------------------------------------------------
+# Manager copy + unified CLI (freeagents)
+#-------------------------------------------------------------------------------
+refresh_manager_copy() {
+  ensure_state_dirs
+  if [ -f "$SCRIPT_PATH" ] && [ ! -c "$SCRIPT_PATH" ]; then
+    cp -f "$SCRIPT_PATH" "${MANAGER_COPY}.tmp" 2>/dev/null && \
+      mv -f "${MANAGER_COPY}.tmp" "$MANAGER_COPY" 2>/dev/null && \
+      chmod 755 "$MANAGER_COPY" 2>/dev/null && \
+      log_ok "       Manager copy stored: ${MANAGER_COPY}" && return 0
+  fi
+  # running from a pipe / process substitution: download instead
+  if download_manager_copy; then
+    log_ok "       Manager copy downloaded: ${MANAGER_COPY}"
+    return 0
+  fi
+  log_warn "       Could not store the manager copy - 'freeagents' will re-download it on demand."
+  return 1
+}
+
+download_manager_copy() { # $1 optional target
+  local target="${1:-$MANAGER_COPY}" url tmp="${MANAGER_COPY}.dl"
+  have curl || return 1
+  ensure_state_dirs
+  for url in "${SELF_RAW_URLS[@]}"; do
+    if curl -fsSL --max-time 120 --retry 2 "$url" -o "$tmp" 2>/dev/null &&
+       grep -q 'FREE_AGENTS_VERSION=' "$tmp" 2>/dev/null && bash -n "$tmp" 2>/dev/null; then
+      chmod 755 "$tmp" 2>/dev/null || true
+      mv -f "$tmp" "$target"
+      return 0
+    fi
+  done
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
 write_management_cli() {
-  $SUDO mkdir -p "$(dirname "$CLI_BIN")"
-  cat <<'LITEOF' | $SUDO tee "$CLI_BIN" >/dev/null
+  $SUDO mkdir -p "$(dirname "$CLI_BIN")" 2>/dev/null || true
+  cat <<'LITEOF' | $SUDO tee "${CLI_BIN}.tmp" >/dev/null
 #!/usr/bin/env bash
 #===============================================================================
-# freeagents - management CLI for the Free AI Agents local gateways (WSL2)
-# Installed by the setup.sh setup script.
+# freeagents - single management command for the Free AI Agents gateways
+# (LiteLLM + OmniRoute). Installed by setup.sh.
 #
-#   freeagents up       Start the gateway (and Docker daemon if needed)
-#   freeagents down     Stop the gateway
-#   freeagents restart  Restart the gateway and wait until healthy
-#   litellm status      Show container state, health and config paths
-#   litellm logs        Follow the proxy logs (Ctrl+C to exit)
-#   freeagents uninstall  Remove everything this installer created
-#   freeagents (no args)  Re-open the Free AI Agents manager menu
+#   freeagents                 open the interactive manager menu
+#   freeagents up|down|restart start/stop/restart BOTH gateways
+#   freeagents status          state + health of BOTH gateways
+#   freeagents doctor [engine] deep diagnosis (providers + live model test)
+#   freeagents logs [engine]   follow logs (engine: litellm|omniroute)
+#   freeagents credentials     dashboard URLs / logins / API keys
+#   freeagents update          re-download from the repo + reinstall
+#   freeagents uninstall       remove everything this installer created
 #===============================================================================
 set -u
 
-CONTAINER_NAME="litellm"
-DB_CONTAINER="litellm-db"
-DB_NETWORK="litellm-net"
-PORT="4000"
-LITELLM_DIR="${HOME}/.litellm"
-KEYFILE="${LITELLM_DIR}/master_key.txt"
-CONFIG_FILE="${LITELLM_DIR}/config.yaml"
-WIN_PROXY_FILE="${LITELLM_DIR}/windows_proxy.txt"
-DESKTOP_PROFILE_ID="00000000-0000-4000-8000-0000000a119e"
 MANAGER_COPY="${HOME}/.free-ai-agents/setup.sh"
-SECONDARY_SCRIPT="${HOME}/.free-ai-agents/OmniRoute.sh"
-CLI_BIN="/usr/local/bin/freeagents"
-BOOT_HELPER="/usr/local/bin/litellm-boot.sh"
-SYSTEMD_UNIT="/etc/systemd/system/litellm.service"
-WSL_CONF="/etc/wsl.conf"
-BOOT_LINE="command = /usr/local/bin/litellm-boot.sh"
+REPO_SLUG="im-JvD/FreeAI-Agents"
+SELF_URLS=(
+  "https://raw.githubusercontent.com/${REPO_SLUG}/main/setup.sh"
+  "https://cdn.jsdelivr.net/gh/${REPO_SLUG}@main/setup.sh"
+)
 
-# Convert a WSL path (/mnt/c/...) back to its Windows form (C:\...)
-wsl_to_win_path() {
-  local p="${1#/mnt/}"
-  local drive="${p%%/*}"
-  local rest="${p#*/}"
-  printf '%s:\\%s' "$(printf '%s' "$drive" | tr '[:lower:]' '[:upper:]')" "$(printf '%s' "$rest" | tr '/' '\\')"
+manager_usable() {
+  [ -s "$MANAGER_COPY" ] || return 1
+  grep -q 'FREE_AGENTS_VERSION=' "$MANAGER_COPY" 2>/dev/null || return 1
+  bash -n "$MANAGER_COPY" 2>/dev/null || return 1
+  return 0
 }
 
-if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
-
-log_info()  { echo "[INFO] $*"; }
-log_ok()    { echo "[ OK ] $*"; }
-log_warn()  { echo "[WARN] $*"; }
-log_error() { echo "[FAIL] $*" >&2; }
-
-daemon_up() { $SUDO docker info >/dev/null 2>&1; }
-
-ensure_daemon() {
-  if daemon_up; then return 0; fi
-  log_info "Starting the Docker daemon..."
-  $SUDO service docker start >/dev/null 2>&1 || true
-  local i
-  for i in $(seq 1 20); do
-    if daemon_up; then log_ok "Docker daemon is up."; return 0; fi
-    sleep 1
+fetch_manager() {
+  local url tmp="${MANAGER_COPY}.dl"
+  mkdir -p "$(dirname "$MANAGER_COPY")" 2>/dev/null || true
+  for url in "${SELF_URLS[@]}"; do
+    if curl -fsSL --max-time 120 --retry 2 "$url" -o "$tmp" 2>/dev/null &&
+       grep -q 'FREE_AGENTS_VERSION=' "$tmp" 2>/dev/null && bash -n "$tmp" 2>/dev/null; then
+      chmod 755 "$tmp" 2>/dev/null || true
+      mv -f "$tmp" "$MANAGER_COPY"
+      return 0
+    fi
   done
-  log_error "Docker daemon did not start. Try: sudo service docker start"
+  rm -f "$tmp" 2>/dev/null || true
   return 1
 }
 
-container_exists() { $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"; }
-is_running()       { [ "$($SUDO docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)" = "true" ]; }
-
-health_code() {
-  if command -v curl >/dev/null 2>&1; then
-    curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${PORT}/health/liveliness" 2>/dev/null || true
-  elif command -v wget >/dev/null 2>&1; then
-    if wget -q -O /dev/null "http://127.0.0.1:${PORT}/health/liveliness" 2>/dev/null; then echo 200; else echo 000; fi
-  else
-    echo "n/a"
+if ! manager_usable; then
+  echo "[INFO] Fetching the Free AI Agents manager from ${REPO_SLUG} ..."
+  if ! fetch_manager; then
+    echo "[FAIL] Could not download the manager from:" >&2
+    printf '       %s\n' "${SELF_URLS[@]}" >&2
+    echo "       Run the installer again when the network is available:" >&2
+    echo "       bash <(curl -fsSL ${SELF_URLS[0]})" >&2
+    exit 1
   fi
-}
-
-wait_healthy() {
-  local i code
-  for i in $(seq 1 15); do
-    code="$(health_code)"
-    if [ "$code" = "200" ]; then
-      log_ok "LiteLLM is healthy: http://127.0.0.1:${PORT}"
-      return 0
-    fi
-    sleep 2
-  done
-  log_warn "Proxy is up but the health check timed out. Logs: ${SUDO} docker logs -f ${CONTAINER_NAME}"
-  return 0
-}
-
-win_home() {
-  local ps=""
-  if command -v powershell.exe >/dev/null 2>&1; then
-    ps="powershell.exe"
-  elif [ -x /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe ]; then
-    ps="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-  fi
-  [ -n "$ps" ] || return 1
-  local raw drive letter rest
-  raw="$($ps -NoProfile -Command "[Environment]::GetFolderPath('UserProfile')" 2>/dev/null | tr -d '\r')" || return 1
-  [ -n "$raw" ] || return 1
-  drive="${raw%%:*}"
-  letter="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
-  rest="${raw#*:}"
-  rest="${rest//\\//}"
-  printf '/mnt/%s%s' "$letter" "$rest"
-}
-
-cmd_credentials() {
-  if [ ! -f "$KEYFILE" ]; then
-    log_error "Master key file not found: ${KEYFILE}"
-    return 1
-  fi
-  local key
-  key="$(tr -d '\n' < "$KEYFILE")"
-  echo "  LiteLLM Admin Panel (UI)"
-  echo "  URL      : http://127.0.0.1:${PORT}/ui"
-  echo "  Username : admin"
-  echo "  Password : ${key}"
-  echo "  (the dashboard password IS the master key)"
-}
-
-cmd_doctor() {
-  # Deep diagnosis: stack status, per-provider connectivity/keys, and a real
-  # chat completion through the local proxy for EVERY configured model.
-  local timeout="${LITELLM_DOCTOR_TIMEOUT:-45}"
-  case "$timeout" in ''|*[!0-9]*) timeout=45 ;; esac
-  ensure_daemon || return 1
-
-  echo "================================================="
-  echo "                 LITELLM DOCTOR"
-  echo "================================================="
-  echo "[STACK]"
-  if is_running; then echo "  proxy container : running"; else echo "  proxy container : STOPPED"; fi
-  echo "  proxy health    : HTTP $(health_code)  (http://127.0.0.1:${PORT}/health/liveliness)"
-  if $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$DB_CONTAINER"; then
-    echo "  ui database     : $($SUDO docker inspect -f '{{.State.Status}}' "$DB_CONTAINER" 2>/dev/null || echo unknown)"
-  else
-    echo "  ui database     : not installed (UI login disabled, chat still works)"
-  fi
-  local wp=""
-  [ -s "$WIN_PROXY_FILE" ] && wp="$(tr -d '\n' < "$WIN_PROXY_FILE" 2>/dev/null || true)"
-  if [ -n "$wp" ]; then
-    echo "  windows proxy   : ${wp}  (provider traffic routed via Windows)"
-  else
-    echo "  windows proxy   : disabled"
-  fi
-  echo
-
-  if [ -n "$wp" ]; then
-    echo "[PROVIDER CONNECTIVITY + KEYS]   (via the Windows proxy)"
-  else
-    echo "[PROVIDER CONNECTIVITY + KEYS]   (direct, from inside WSL)"
-  fi
-  local envs key code
-  envs="$($SUDO docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
-  local proxy_args=()
-  [ -n "$wp" ] && proxy_args=(-x "$wp")
-  _doc_provider() { # $1 name $2 envname $3 url $4 auth
-    key="$(printf '%s\n' "$envs" | sed -n "s/^${2}=//p" | head -1)"
-    if [ -z "$key" ]; then
-      echo "  ${1}: no key configured"
-      return 0
-    fi
-    if [ "$4" = "query" ]; then
-      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "${LITELLM_KEY_CHECK_TIMEOUT:-10}" ${proxy_args[@]+"${proxy_args[@]}"} "$3?key=$key" 2>/dev/null || true)"
-    else
-      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "${LITELLM_KEY_CHECK_TIMEOUT:-10}" ${proxy_args[@]+"${proxy_args[@]}"} -H "Authorization: Bearer $key" "$3" 2>/dev/null || true)"
-    fi
-    case "$code" in
-      200)      echo "  ${1}: reachable, key valid (HTTP 200)" ;;
-      401|403)  echo "  ${1}: REJECTED (HTTP ${code}) - invalid key OR the provider blocks your region" ;;
-      000|'')   echo "  ${1}: UNREACHABLE from this network (timeout/blocked)" ;;
-      *)        echo "  ${1}: HTTP ${code}" ;;
-    esac
-    return 0
-  }
-  _doc_provider "Groq"       "GROQ_API_KEY"       "https://api.groq.com/openai/v1/models"                    bearer
-  _doc_provider "OpenRouter" "OPENROUTER_API_KEY" "https://openrouter.ai/api/v1/key"                         bearer
-  _doc_provider "Google AI"  "GEMINI_API_KEY"     "https://generativelanguage.googleapis.com/v1beta/models"  query
-  _doc_provider "Cerebras"   "CEREBRAS_API_KEY"   "https://api.cerebras.ai/v1/models"                        bearer
-  _doc_provider "Mistral"    "MISTRAL_API_KEY"    "https://api.mistral.ai/v1/models"                         bearer
-  echo
-
-  echo "[MODEL LIVE TESTS]   (real chat call via http://127.0.0.1:${PORT}/v1)"
-  local mk models_json id start lat body code2 fails=0 total=0
-  mk="$(tr -d '\n' < "$KEYFILE" 2>/dev/null)"
-  if [ -z "$mk" ]; then
-    echo "  master key file missing - cannot test models"
-    return 1
-  fi
-  models_json="$(curl -s --max-time 10 -H "Authorization: Bearer $mk" "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
-  ids="$(printf '%s' "$models_json" | grep -o '"id":"[^"]*"' | sed 's/"id":"//; s/"$//')"
-  if [ -z "$ids" ]; then
-    echo "  could not read the model list from the proxy"
-    return 1
-  fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    total=$((total + 1))
-    body="$(mktemp)"
-    start="$(date +%s)"
-    code2="$(curl -s -o "$body" -w '%{http_code}' --max-time "$timeout" \
-      -X POST -H "Authorization: Bearer $mk" -H "Content-Type: application/json" \
-      -d "{\"model\":\"$id\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":8}" \
-      "http://127.0.0.1:${PORT}/v1/chat/completions" 2>/dev/null || true)"
-    lat=$(( $(date +%s) - start ))
-    if [ "$code2" = "200" ]; then
-      echo "  OK   ${id} (${lat}s)"
-    else
-      fails=$((fails + 1))
-      echo "  FAIL ${id} (HTTP ${code2:-none}): $(head -c 220 "$body" 2>/dev/null | tr '\n' ' ')"
-    fi
-    rm -f "$body"
-  done <<EOFDOCTOR
-$ids
-EOFDOCTOR
-  echo
-  echo "[SUMMARY]"
-  if [ "$fails" -eq 0 ]; then
-    echo "  ALL ${total} MODEL TESTS PASSED"
-  else
-    echo "  ${fails}/${total} model test(s) FAILED"
-    echo "  Hints:"
-    echo "   - FAIL with 401/403 while [PROVIDER] above says 'reachable, key valid':"
-    echo "     the provider blocks your region/IP (US providers block Iran)."
-    echo "     Run a system-wide VPN on the WINDOWS side, then 'litellm restart'."
-    echo "   - REJECTED in [PROVIDER] section => key wrong for that provider:"
-    echo "     re-run the installer and answer 'n' at 'Keep these keys?'"
-    echo "   - UNREACHABLE => your network cannot reach the provider at all (VPN needed)"
-    echo "   - No VPN? Re-run the installer and enable the WINDOWS PROXY option"
-    echo "     (Clash / v2rayN / Hiddify) - provider traffic then exits via Windows."
-  fi
-  echo "================================================="
-  [ "$fails" -eq 0 ]
-}
-
-cmd_up() {
-  ensure_daemon || return 1
-  if ! container_exists; then
-    log_error "Container '${CONTAINER_NAME}' does not exist. Run the installer first."
-    return 1
-  fi
-  if is_running; then
-    log_ok "Proxy is already running."
-  else
-    log_info "Starting '${CONTAINER_NAME}'..."
-    $SUDO docker start "$CONTAINER_NAME" >/dev/null
-    log_ok "Container started."
-  fi
-  wait_healthy
-}
-
-cmd_down() {
-  if ! container_exists; then
-    log_warn "No container named '${CONTAINER_NAME}' found."
-    return 0
-  fi
-  if is_running; then
-    $SUDO docker stop "$CONTAINER_NAME" >/dev/null
-    log_ok "Proxy stopped."
-  else
-    log_ok "Proxy is already stopped."
-  fi
-}
-
-cmd_restart() {
-  ensure_daemon || return 1
-  $SUDO docker restart "$CONTAINER_NAME" >/dev/null
-  log_ok "Proxy restarted."
-  wait_healthy
-}
-
-cmd_status() {
-  ensure_daemon || return 1
-  if ! container_exists; then
-    log_warn "Container '${CONTAINER_NAME}' is not installed."
-    return 1
-  fi
-  local state policy
-  state="$($SUDO docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo unknown)"
-  policy="$($SUDO docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTAINER_NAME" 2>/dev/null || echo unknown)"
-  echo "  Container state : ${state}"
-  echo "  Restart policy  : ${policy}"
-  echo "  Health endpoint : $(health_code)  (http://127.0.0.1:${PORT}/health/liveliness)"
-  echo "  OpenAI endpoint : http://127.0.0.1:${PORT}/v1"
-  echo "  Admin panel     : http://127.0.0.1:${PORT}/ui  (user: admin, password: master key)"
-  if $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$DB_CONTAINER"; then
-    local dbstate
-    dbstate="$($SUDO docker inspect -f '{{.State.Status}}' "$DB_CONTAINER" 2>/dev/null || echo unknown)"
-    echo "  Admin database  : ${DB_CONTAINER} (${dbstate})"
-  else
-    echo "  Admin database  : not installed (UI login requires it)"
-  fi
-  echo "  Config file     : ${CONFIG_FILE}$([ -f "$CONFIG_FILE" ] && echo ' (present)' || echo ' (missing)')"
-  echo "  Master key file : ${KEYFILE}$([ -f "$KEYFILE" ] && echo ' (present)' || echo ' (missing)')"
-  echo "  UI credentials  : ${LITELLM_DIR}/dashboard_credentials.txt$([ -f "${LITELLM_DIR}/dashboard_credentials.txt" ] && echo ' (present)' || echo ' (missing)')"
-}
-
-cmd_logs() {
-  ensure_daemon || return 1
-  $SUDO docker logs -f --tail 100 "$CONTAINER_NAME"
-}
-
-cmd_uninstall() {
-  local assume_yes="${1:-}"
-  if [ "$assume_yes" != "--yes" ] && [ "$assume_yes" != "-y" ]; then
-    printf "This removes the proxy container, all configs and this CLI. Continue? [y/N]: "
-    local answer=""
-    read -r answer || answer=""
-    case "$answer" in
-      y|Y|yes|YES) ;;
-      *) log_info "Aborted."; return 1 ;;
-    esac
-  fi
-
-  if container_exists; then
-    $SUDO docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    $SUDO docker rm "$CONTAINER_NAME"   >/dev/null 2>&1 || true
-    log_ok "Container removed."
-  else
-    log_warn "No container named '${CONTAINER_NAME}' found."
-  fi
-
-  if $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$DB_CONTAINER"; then
-    $SUDO docker stop "$DB_CONTAINER" >/dev/null 2>&1 || true
-    $SUDO docker rm "$DB_CONTAINER"   >/dev/null 2>&1 || true
-    log_ok "Admin UI database container removed."
-  fi
-  $SUDO docker network rm "$DB_NETWORK" >/dev/null 2>&1 || true
-
-  if [ -d "$LITELLM_DIR" ]; then
-    rm -rf "$LITELLM_DIR"
-    log_ok "Removed ${LITELLM_DIR}"
-  fi
-
-  local wh cc
-  wh="$(win_home || true)"
-  if [ -n "$wh" ] && [ -d "$wh" ]; then
-    cc="${wh}/.claude/settings.json"
-    if [ -f "$cc" ]; then
-      rm -f "$cc"
-      log_ok "Removed ${cc}"
-    fi
-    local newest_bak
-    newest_bak="$(ls -1t "${wh}/.claude/settings.json.bak."* 2>/dev/null | head -1 || true)"
-    if [ -n "$newest_bak" ] && [ -f "$newest_bak" ]; then
-      cp "$newest_bak" "$cc"
-      log_ok "Restored pre-install backup: ${newest_bak}"
-    fi
-    # Remove the Claude Desktop gateway policy (HKCU registry)
-    local ps_bin="" reg_bak_win="" newest_reg_bak
-    ps_bin="$(command -v powershell.exe 2>/dev/null || true)"
-    if [ -z "$ps_bin" ] && [ -x /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe ]; then
-      ps_bin="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-    fi
-    if [ -n "$ps_bin" ]; then
-      newest_reg_bak="$(ls -1t "${wh}/.claude/claude_desktop_policy.reg.bak."* 2>/dev/null | head -1 || true)"
-      if [ -n "$newest_reg_bak" ] && [ -f "$newest_reg_bak" ]; then
-        reg_bak_win="$(wsl_to_win_path "$newest_reg_bak")"
-      fi
-      "$ps_bin" -NoProfile -Command "Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceProvider' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceGatewayBaseUrl' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceCredentialKind' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceGatewayAuthScheme' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceGatewayApiKey' -ErrorAction SilentlyContinue" >/dev/null 2>&1 \
-        && log_ok "Removed the legacy Claude Desktop registry policy" \
-        || log_warn "Could not clean the legacy Claude Desktop policy (registry)"
-          local la="" prof="" mta=""
-          la="$("$ps_bin" -NoProfile -Command "[Environment]::GetFolderPath('LocalApplicationData')" 2>/dev/null | tr -d '\r' | head -n1 || true)"
-          if [ -n "$la" ]; then
-            local ld llr
-            ld="${la%%:*}"; llr="$(printf '%s' "$ld" | tr '[:upper:]' '[:lower:]')"; la="${la#*:}"; la="${la//\\//}"
-            la="/mnt/${llr}${la}"
-            prof="${la}/Claude-3p/configLibrary/${DESKTOP_PROFILE_ID}.json"
-            mta="${la}/Claude-3p/configLibrary/_meta.json"
-            if [ -f "$prof" ]; then
-              rm -f "$prof"
-              log_ok "Removed the Claude Desktop profile: ${prof}"
-            fi
-            if [ -f "$mta" ] && command -v python3 >/dev/null 2>&1; then
-              CLAUDE_META_FILE="$mta" CLAUDE_PROFILE_ID="$DESKTOP_PROFILE_ID" python3 <<'PYMETA' || true
-    import json, os
-    p = os.environ["CLAUDE_META_FILE"]; pid = os.environ["CLAUDE_PROFILE_ID"]
-    try:
-        meta = json.load(open(p))
-    except Exception:
-        raise SystemExit(0)
-    entries = [e for e in (meta.get("entries") or [])
-           if e.get("id") != pid and e.get("id") != "litellm-free-ai-agents"]
-    meta["entries"] = entries
-    if meta.get("appliedId") == pid:
-        meta["appliedId"] = entries[0]["id"] if entries else None
-    json.dump(meta, open(p, "w"), indent=2)
-PYMETA
-            fi
-          fi
-    fi
-  fi
-
-  if $SUDO test -f "$SYSTEMD_UNIT"; then
-    $SUDO rm -f "$SYSTEMD_UNIT"
-    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
-    log_ok "Removed systemd service."
-  fi
-  if $SUDO test -f "$BOOT_HELPER"; then
-    $SUDO rm -f "$BOOT_HELPER"
-    log_ok "Removed boot helper."
-  fi
-  if $SUDO test -f "$WSL_CONF" && $SUDO grep -qF "$BOOT_LINE" "$WSL_CONF" 2>/dev/null; then
-    $SUDO sed -i "\|^${BOOT_LINE}\$|d" "$WSL_CONF"
-    log_ok "Removed boot entry from ${WSL_CONF}."
-  fi
-  if $SUDO test -f "$CLI_BIN"; then
-    $SUDO rm -f "$CLI_BIN"
-    log_ok "Management CLI removed."
-  fi
-
-  echo
-  log_ok "UNINSTALL COMPLETED."
-  echo "  Kept: Docker Engine, /etc/docker/daemon.json and the pulled images."
-  return 0
-}
-
-run_secondary() { # $1 = action for the secondary gateway manager
-  if [ -s "$SECONDARY_SCRIPT" ]; then
-    echo "--- secondary gateway ---"
-    bash "$SECONDARY_SCRIPT" "$1" || true
-  fi
-}
-
-if [ $# -eq 0 ]; then
-  if [ -f "$MANAGER_COPY" ]; then
-    exec bash "$MANAGER_COPY"
-  fi
-  echo "Manager menu not found - re-run the setup.sh installer."
-  exit 1
 fi
 
-case "${1:-}" in
-  up)        shift; cmd_up "$@"; run_secondary --up ;;
-  down)      shift; cmd_down "$@"; run_secondary --down ;;
-  restart)   shift; cmd_restart "$@"; run_secondary --restart ;;
-  status)    shift; cmd_status "$@"; run_secondary --status ;;
-  credentials|ui) shift; cmd_credentials "$@" ;;
-  doctor)    shift; cmd_doctor "$@"; exit $? ;;
-  logs)      shift; cmd_logs "$@" ;;
-  uninstall) shift; cmd_uninstall "${1:-}"; run_secondary --uninstall ;;
+if [ "$#" -eq 0 ]; then
+  exec bash "$MANAGER_COPY"
+fi
+
+case "$1" in
   help|-h|--help)
-    echo "Usage: freeagents {up|down|restart|status|logs|uninstall}"
-    echo "  up          start the gateway (and Docker if needed)"
-    echo "  down        stop the gateway"
-    echo "  restart     restart the gateway and wait until healthy"
-    echo "  status      show container state, health and config paths"
-    echo "  credentials show Admin Panel URL / username / password"
-    echo "  doctor      deep diagnosis: providers + live test of EVERY model"
-    echo "  logs        follow gateway logs (Ctrl+C to exit)"
-    echo "  uninstall   remove everything this installer created"
-    echo "  (no args)   open the Free AI Agents manager menu"
+    sed -n '3,16p' "$MANAGER_COPY" 2>/dev/null | sed 's/^# \{0,1\}//' || true
+    cat <<'USAGE'
+Usage: freeagents [command]
+
+  (no args)            open the interactive manager menu
+  up                   start BOTH gateways (Docker daemon if needed)
+  down                 stop BOTH gateways
+  restart              restart BOTH gateways and wait until healthy
+  status               state, health, ports and files of BOTH gateways
+  doctor [engine]      deep diagnosis (engine: litellm|omniroute, default both)
+  logs [engine]        follow logs (engine: litellm|omniroute, default litellm)
+  credentials          dashboard URLs, logins and Claude tokens
+  update               re-download from the repo + full reinstall (keys kept)
+  uninstall [--yes]    remove everything this installer created
+USAGE
+    exit 0
     ;;
-  *) log_error "Unknown command: '${1}'. Try 'freeagents help'."; exit 1 ;;
 esac
+
+exec bash "$MANAGER_COPY" "$@"
 LITEOF
+  $SUDO mv -f "${CLI_BIN}.tmp" "$CLI_BIN"
   $SUDO chmod 755 "$CLI_BIN"
-}
-
-# Auto-start mode: auto (default) | systemd | wslconf  (env: LITELLM_BOOT_MODE)
-use_systemd() {
-  case "${LITELLM_BOOT_MODE:-auto}" in
-    systemd) return 0 ;;
-    wslconf) return 1 ;;
-    *) [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && return 0 ;;
-  esac
-  return 1
-}
-
-configure_autostart_and_cli() {
-  log_info "[8/9] Setting up auto-start on boot + management CLI..."
-  write_boot_helper
-  write_management_cli
-
-  if use_systemd; then
-    # real systemd available (wsl.conf [boot] systemd=true)
-    $SUDO mkdir -p /etc/systemd/system
-    printf '%s\n' \
-      '[Unit]' \
-      'Description=LiteLLM proxy container (Docker)' \
-      'After=docker.service' \
-      'Requires=docker.service' \
-      '' \
-      '[Service]' \
-      'Type=oneshot' \
-      'RemainAfterExit=yes' \
-      'ExecStart=/usr/local/bin/litellm-boot.sh' \
-      '' \
-      '[Install]' \
-      'WantedBy=multi-user.target' \
-      | $SUDO tee "$SYSTEMD_UNIT" >/dev/null
-    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
-    $SUDO systemctl enable litellm.service >/dev/null 2>&1 || true
-    AUTOSTART_MODE="systemd service: litellm.service (enabled)"
-  else
-    # no systemd -> WSL boot command (runs as root when the distro starts)
-    if ! $SUDO test -f "$WSL_CONF"; then
-      printf '' | $SUDO tee "$WSL_CONF" >/dev/null
-    fi
-    if $SUDO grep -qF "$BOOT_LINE" "$WSL_CONF" 2>/dev/null; then
-      log_ok "       Boot entry already present in ${WSL_CONF}."
-    elif $SUDO grep -qE '^[[:space:]]*command[[:space:]]*=' "$WSL_CONF" 2>/dev/null; then
-      log_warn "       ${WSL_CONF} already defines a custom boot command - add this line under [boot] manually:"
-      log_warn "         ${BOOT_LINE}"
-    else
-      if $SUDO grep -qE '^[[:space:]]*\[boot\]' "$WSL_CONF" 2>/dev/null; then
-        $SUDO sed -i "/^[[:space:]]*\[boot\]/a ${BOOT_LINE}" "$WSL_CONF"
-      else
-        printf '\n[boot]\n%s\n' "$BOOT_LINE" | $SUDO tee -a "$WSL_CONF" >/dev/null
-      fi
-      log_ok "       Boot command added to ${WSL_CONF}."
-    fi
-    AUTOSTART_MODE="/etc/wsl.conf boot command (no systemd detected)"
-  fi
-
-  log_ok "Auto-start on WSL boot: ${AUTOSTART_MODE}"
-  log_ok "Management CLI installed: ${CLI_BIN}  (try: freeagents status)"
-}
-
-#-------------------------------------------------------------------------------
-# Claude Code configuration on the Windows side
-#-------------------------------------------------------------------------------
-configure_claude_windows() {
-  log_info "[9/9] Configuring Claude Code on the Windows side..."
-
-  local win_home cc_dir
-  win_home="$(get_windows_home)" || \
-    die "Could not detect the Windows user profile via PowerShell."
-
-  if [ ! -d "$win_home" ]; then
-    die "Converted Windows profile path does not exist in WSL: ${win_home}"
-  fi
-  log_ok "Windows user profile detected: ${win_home}"
-
-  cc_dir="${win_home}/.claude"
-  CLAUDE_SETTINGS="${cc_dir}/settings.json"
-  mkdir -p "$cc_dir"
-
-  # Preserve any existing user settings before overwriting
-  if [ -f "$CLAUDE_SETTINGS" ]; then
-    local backup="${CLAUDE_SETTINGS}.bak.$(date +%Y%m%d%H%M%S)"
-    cp "$CLAUDE_SETTINGS" "$backup"
-    log_warn "Existing settings.json backed up to: ${backup}"
-  fi
-
-  # Default model: first available by provider priority; fast/background
-  # model: Gemini Flash when available (cheap + fast), else the default.
-  local main_model="" fast_model="" fast_candidate=""
-  if [ -n "$GROQ_KEY" ]; then
-    [ -z "$main_model" ] && main_model="claude-gpt-oss-120b"
-    [ -z "$fast_candidate" ] && fast_candidate="claude-gpt-oss-20b"
-  fi
-  if [ -n "$OPENROUTER_KEY" ]; then
-    [ -z "$main_model" ] && main_model="claude-deepseek-v3.1"
-  fi
-  if [ -n "$GEMINI_KEY" ]; then
-    [ -z "$main_model" ] && main_model="claude-gemini-2.0-flash"
-    fast_model="claude-gemini-2.0-flash"
-  fi
-  if [ -n "$CEREBRAS_KEY" ]; then
-    [ -z "$main_model" ] && main_model="claude-llama3.1-70b"
-  fi
-  if [ -n "$MISTRAL_KEY" ]; then
-    [ -z "$main_model" ] && main_model="claude-codestral"
-  fi
-  [ -z "$fast_model" ] && fast_model="${fast_candidate:-$main_model}"
-  CLAUDE_MAIN_MODEL="$main_model"
-  CLAUDE_FAST_MODEL="$fast_model"
-
-  # Claude Code talks the Anthropic Messages API; LiteLLM serves it at
-  # /v1/messages. BASE_URL must NOT carry a /v1 suffix. Gateway model
-  # discovery makes the /model picker list every model from the proxy.
-  cat > "$CLAUDE_SETTINGS" <<EOF
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:${LITELLM_PORT}",
-    "ANTHROPIC_AUTH_TOKEN": "${MASTER_KEY}",
-    "ANTHROPIC_MODEL": "${main_model}",
-    "ANTHROPIC_SMALL_FAST_MODEL": "${fast_model}",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "${main_model}",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "${main_model}",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${fast_model}",
-    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
-  }
-}
-EOF
-
-  log_ok "Claude Code settings written: ${CLAUDE_SETTINGS}"
-  log_ok "Default model: ${main_model} | background model: ${fast_model}"
-}
-
-configure_claude_desktop_windows() {
-  # The Claude DESKTOP app stores its "Configurations" (third-party gateway
-  # profiles) as JSON files under %LOCALAPPDATA%\Claude-3p\configLibrary -
-  # the same place the app's own "Configure Third-Party Inference" window
-  # and the OmniRoute installer write to. No registry, no admin rights.
-  # Skip with LITELLM_DESKTOP_CONFIG=0.
-  if [ "${LITELLM_DESKTOP_CONFIG:-1}" != "1" ]; then
-    DESKTOP_POLICY_STATUS="off"
-    log_info "       Claude Desktop auto-config disabled (LITELLM_DESKTOP_CONFIG=0)."
-    return 0
-  fi
-  local ps=""
-  ps="$(find_powershell 2>/dev/null || true)"
-  if [ -z "$ps" ]; then
-    DESKTOP_POLICY_STATUS="nops"
-    log_warn "       powershell.exe not found - Claude Desktop app NOT auto-configured."
-    log_warn "       Manual recipe: Developer Mode > Configure Third-Party Inference."
-    return 0
-  fi
-
-  log_info "       Writing the LiteLLM profile into the Claude Desktop app..."
-
-  local local_app="" root="" lib="" profile="" meta="" deskcfg=""
-  local_app="$($ps -NoProfile -Command "[Environment]::GetFolderPath('LocalApplicationData')" 2>/dev/null | tr -d '\r' | head -n1 || true)"
-  if [ -n "$local_app" ]; then
-    local drive letter rest
-    drive="${local_app%%:*}"
-    letter="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
-    rest="${local_app#*:}"; rest="${rest//\\//}"
-    local_app="/mnt/${letter}${rest}"
-  else
-    local wh=""
-    wh="$(get_windows_home 2>/dev/null || true)"
-    [ -n "$wh" ] && local_app="${wh}/AppData/Local"
-  fi
-  if [ -z "$local_app" ]; then
-    DESKTOP_POLICY_STATUS="failed"
-    log_warn "       Could not locate %LOCALAPPDATA% - Desktop profile not written."
-    return 0
-  fi
-  root="${local_app}/Claude-3p"
-  lib="${root}/configLibrary"
-  profile="${lib}/${DESKTOP_PROFILE_ID}.json"
-  meta="${lib}/_meta.json"
-  deskcfg="${root}/claude_desktop_config.json"
-  mkdir -p "$lib" 2>/dev/null || { DESKTOP_POLICY_STATUS="failed"; log_warn "       Cannot create ${lib}"; return 0; }
-
-  # Purge profiles written by OLDER versions of this script (non-UUID
-  # ids) so the app list does not fill with duplicate entries.
-  if [ -f "${lib}/litellm-free-ai-agents.json" ]; then
-    rm -f "${lib}/litellm-free-ai-agents.json"
-    log_info "       Removed an outdated desktop profile (old id)."
-  fi
-
-  # Model names MUST be Anthropic catalog ids (the app validates them):
-  # claude-sonnet-4-5 / claude-haiku-4-5. They are aliases inside the
-  # gateway config and route to the SAME free underlying models.
-  cat > "$profile" <<EOF
-{
-  "inferenceProvider": "gateway",
-  "inferenceCredentialKind": "static",
-  "inferenceGatewayBaseUrl": "http://127.0.0.1:${LITELLM_PORT}",
-  "inferenceGatewayApiKey": "${MASTER_KEY}",
-  "inferenceGatewayAuthScheme": "bearer",
-  "modelDiscoveryEnabled": true,
-  "chatTabEnabled": true,
-  "disableEssentialTelemetry": true,
-  "disableNonessentialTelemetry": true,
-  "inferenceModels": [
-    { "name": "claude-sonnet-4-5", "labelOverride": "FreeAgents/LiteLLM ${CLAUDE_MAIN_MODEL#claude-}", "isFamilyDefault": true },
-    { "name": "claude-haiku-4-5", "labelOverride": "FreeAgents/LiteLLM ${CLAUDE_FAST_MODEL#claude-}" }
-  ]
-}
-EOF
-  chmod 600 "$profile" 2>/dev/null || true
-
-  # Register the profile in _meta.json (never steals an OmniRoute-applied pick)
-  if command -v python3 >/dev/null 2>&1; then
-    CLAUDE_META_FILE="$meta" CLAUDE_PROFILE_ID="$DESKTOP_PROFILE_ID" python3 <<'PYMETA' || true
-import json, os
-p = os.environ["CLAUDE_META_FILE"]; pid = os.environ["CLAUDE_PROFILE_ID"]
-meta = {"appliedId": pid, "entries": []}
-if os.path.exists(p):
-    try:
-        meta = json.load(open(p))
-    except Exception:
-        meta = {"appliedId": pid, "entries": []}
-entries = [e for e in (meta.get("entries") or [])
-           if e.get("id") != pid and e.get("id") != "litellm-free-ai-agents"]
-entries.append({"id": pid, "name": "Free Agents"})
-meta["entries"] = entries
-cur = meta.get("appliedId")
-known = {e.get("id") for e in entries}
-if cur not in known or cur == pid or not cur:
-    meta["appliedId"] = pid
-json.dump(meta, open(p, "w"), indent=2)
-PYMETA
-  else
-    if [ ! -f "$meta" ]; then
-      printf '{\n  "appliedId": "%s",\n  "entries": [{"id": "%s", "name": "Free Agents"}]\n}\n' "$DESKTOP_PROFILE_ID" "$DESKTOP_PROFILE_ID" > "$meta"
-      chmod 600 "$meta" 2>/dev/null || true
-    fi
-  fi
-  chmod 600 "$meta" 2>/dev/null || true
-
-  # deploymentMode=3p so the app starts in gateway mode
-  if [ -f "$deskcfg" ]; then
-    if command -v python3 >/dev/null 2>&1 && python3 -c "import json;json.load(open('$deskcfg'))" 2>/dev/null; then
-      CLAUDE_DESK_FILE="$deskcfg" python3 <<'PYDESK' || true
-import json, os
-p = os.environ["CLAUDE_DESK_FILE"]
-d = json.load(open(p)); d["deploymentMode"] = "3p"
-json.dump(d, open(p, "w"), indent=2)
-PYDESK
-    else
-      log_warn "       claude_desktop_config.json is not valid JSON - leaving it untouched."
-    fi
-  else
-    printf '{\n  "deploymentMode": "3p"\n}\n' > "$deskcfg" 2>/dev/null || true
-    chmod 600 "$deskcfg" 2>/dev/null || true
-  fi
-
-  # Unified in-chat labels for the OTHER saved profile too (its own
-  # installer labels models with its engine name).
-  for f in "${lib}"/*.json; do
-    [ -e "$f" ] || break
-    [ "$(basename "$f")" = "$(basename "$profile")" ] && continue
-    if grep -q '"labelOverride": "OmniRoute ' "$f" 2>/dev/null; then
-      sed -i 's/"labelOverride": "OmniRoute /"labelOverride": "FreeAgents\/Omni /g' "$f" 2>/dev/null || true
-      log_info "       Unified the model labels of the other saved profile."
+  # legacy single-gateway CLIs must NOT exist anymore (requirement: no
+  # 'omni up/down' and no 'litellm up/down' commands)
+  local b
+  for b in "${LEGACY_CLI_BINS[@]}"; do
+    if $SUDO test -f "$b"; then
+      $SUDO rm -f "$b" && log_info "       Removed legacy command: ${b}"
     fi
   done
+  log_ok "Management CLI installed: ${CLI_BIN}"
+}
 
-  DESKTOP_POLICY_STATUS="ok"
-  log_ok "       Desktop profile written (configLibrary): ${profile}"
+#===============================================================================
+# Engine lifecycle helpers used by the menu / CLI
+#===============================================================================
+start_litellm_engine() {
+  if ! litellm_installed; then
+    log_warn "LiteLLM: not installed (menu item 1 installs it)."
+    return 1
+  fi
+  if have docker; then
+    if ! $SUDO docker info >/dev/null 2>&1; then
+      log_info "LiteLLM: starting the Docker daemon..."
+      $SUDO service docker start >/dev/null 2>&1 || true
+      local i
+      for i in $(seq 1 20); do $SUDO docker info >/dev/null 2>&1 && break; sleep 1; done
+    fi
+  fi
+  if litellm_container_running; then
+    log_ok "LiteLLM: already running."
+  else
+    $SUDO docker start "$CONTAINER_NAME" >/dev/null 2>&1 || { log_error "LiteLLM: docker start failed."; return 1; }
+    log_ok "LiteLLM: container started."
+  fi
+  wait_for_litellm
+  return 0
+}
+
+stop_litellm_engine() {
+  litellm_installed || { log_info "LiteLLM: not installed."; return 0; }
+  if litellm_container_running; then
+    $SUDO docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    log_ok "LiteLLM: stopped."
+  else
+    log_info "LiteLLM: already stopped."
+  fi
+  return 0
+}
+
+restart_litellm_engine() {
+  litellm_installed || { log_warn "LiteLLM: not installed."; return 1; }
+  $SUDO docker restart "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  log_ok "LiteLLM: restarted."
+  wait_for_litellm
+  return 0
+}
+
+start_omni_engine() {
+  omni_installed || { log_warn "OmniRoute: not installed (menu item 1 installs it)."; return 1; }
+  start_omni_service
+  wait_for_omni
+  return 0
+}
+
+stop_omni_engine() {
+  omni_installed || { log_info "OmniRoute: not installed."; return 0; }
+  stop_omni_service
+  return 0
+}
+
+restart_omni_engine() {
+  omni_installed || { log_warn "OmniRoute: not installed."; return 1; }
+  stop_omni_service >/dev/null 2>&1 || true
+  start_omni_service
+  wait_for_omni
   return 0
 }
 
 #-------------------------------------------------------------------------------
-# Full Install
+# INSTALL - LiteLLM
 #-------------------------------------------------------------------------------
-full_install() {
-  echo
-  log_info "=== FULL INSTALL: starting ==="
-  echo
-
-  check_wsl_environment                       # step 1
-  install_docker                              # step 2
-  configure_docker_mirrors                    # step 3
+install_litellm() {
+  log_info "=== LiteLLM: installing ==="
+  install_docker
+  configure_docker_mirrors
   start_docker_daemon
-  collect_api_keys                            # step 4
   generate_master_key
-  generate_litellm_config                     # step 5
-  pull_liteLLM_image                          # step 6
-  start_litellm_container                     # step 7
+  generate_litellm_config
+  pull_litellm_image
+  start_litellm_container
   wait_for_litellm
-  configure_autostart_and_cli                 # step 8 (autostart + litellm CLI)
+  log_ok "LiteLLM engine ready on http://127.0.0.1:${LITELLM_PORT}"
+  return 0
+}
 
-  CLAUDE_SETTINGS=""
-  configure_claude_windows                    # step 9
-  configure_claude_desktop_windows            # step 9b (Claude Desktop app)
+#-------------------------------------------------------------------------------
+# INSTALL - OmniRoute
+#-------------------------------------------------------------------------------
+install_omniroute() {
+  log_info "=== OmniRoute: installing (official npm package) ==="
+  ensure_node_runtime
+  npm_install_omniroute
+  write_omni_env
+  start_omni_service
+  wait_for_omni
+  configure_omniroute
+  omni_verify || true
+  log_ok "OmniRoute engine ready on http://127.0.0.1:${OMNI_PORT}"
+  return 0
+}
 
-  # Persist a copy of this manager so `freeagents` (bare) re-opens the menu
-  mkdir -p "$FREE_AGENTS_DIR" 2>/dev/null || true
-  if [ -f "$SCRIPT_PATH" ]; then
-    cp -f "$SCRIPT_PATH" "$MANAGER_COPY" 2>/dev/null || true
-    chmod 755 "$MANAGER_COPY" 2>/dev/null || true
-  fi
+#-------------------------------------------------------------------------------
+# INSTALL - orchestrator (keys + proxy are collected exactly ONCE)
+#-------------------------------------------------------------------------------
+full_install() { # $1 = litellm | omniroute | both
+  local engine="${1:-both}"
+  echo
+  log_info "=== FREE AI AGENTS INSTALL (${engine}) ==="
+  echo
 
-  print_install_success "$CLAUDE_SETTINGS"
+  check_environment
+  collect_keys
+
+  case "$engine" in
+    litellm)   install_litellm ;;
+    omniroute) install_omniroute ;;
+    both)
+      install_litellm
+      install_omniroute
+      ;;
+  esac
+
+  # the active gateway decides where Claude points by default
+  case "$engine" in
+    omniroute) set_active_gateway omniroute >/dev/null ;;
+    litellm)   set_active_gateway litellm >/dev/null ;;
+    both)      set_active_gateway litellm >/dev/null ;;
+  esac
+
+  configure_autostart "$engine"
+  configure_claude_all "$(active_gateway)"
+  refresh_manager_copy || true
+  write_management_cli
+  save_provider_keys
+
+  print_install_success "$engine"
 }
 
 print_install_success() {
-  local oc_file="$1"
+  local engine="$1" gw
+  gw="$(active_gateway)"
   echo
   echo -e "${C_GREEN}${C_BOLD}================================================================="
   echo "  INSTALLATION COMPLETED SUCCESSFULLY!"
   echo -e "=================================================================${C_NC}"
   echo
-  echo "  LiteLLM endpoint (from Windows) : http://127.0.0.1:${LITELLM_PORT}/v1"
+  echo "  Engines installed : ${engine}"
+  echo "  Active gateway    : ${gw}  ($(gateway_label "$gw"))"
+  echo "  Model for Claude  : ${MODEL_ID}"
   echo
-  echo -e "${C_BOLD}  ADMIN PANEL (UI) - open in the WINDOWS browser:${C_NC}"
-  echo "    URL       : http://127.0.0.1:${LITELLM_PORT}/ui"
-  echo "    Username  : admin"
-  echo "    Password  : ${MASTER_KEY}"
-  echo "    (the dashboard password IS the master key - no separate password exists)"
-  echo "    saved to  : ${LITELLM_CRED_FILE}"
-  echo
-  echo "  Master key (also saved to)      : ${LITELLM_KEYFILE}"
-  echo "  Master key                      : ${MASTER_KEY}"
-  echo "  LiteLLM config file             : ${LITELLM_CONFIG}"
-  echo "  Claude Code settings (Windows)  : ${oc_file}"
-  echo "  Container name                  : ${CONTAINER_NAME}"
-  echo "  Auto-start on WSL boot          : ${AUTOSTART_MODE}"
-  echo "  Windows proxy routing           : ${WIN_PROXY_URL:-disabled}"
-  if [ "$UI_DB_ENABLED" = "1" ]; then
-    echo "  Admin UI database               : ${DB_CONTAINER} (postgres, restart: unless-stopped)"
-  else
-    echo "  Admin UI database               : disabled (UI login will NOT work; Claude Code chat is fine)"
+  if litellm_installed; then
+    echo -e "${C_BOLD}  LiteLLM${C_NC}"
+    echo "    Endpoint    : http://127.0.0.1:${LITELLM_PORT}/v1"
+    echo "    Admin panel : http://127.0.0.1:${LITELLM_PORT}/ui  (user: admin)"
+    echo "    Master key  : ${LITELLM_KEYFILE}   (also the dashboard password)"
+    echo "    Config      : ${LITELLM_CONFIG}"
+  fi
+  if omni_installed; then
+    echo -e "${C_BOLD}  OmniRoute${C_NC}"
+    echo "    Endpoint    : http://127.0.0.1:${OMNI_PORT}/v1"
+    echo "    Dashboard   : http://127.0.0.1:${OMNI_PORT}"
+    echo "    Dashboard   : password stored in ${OMNI_ENV_FILE} (INITIAL_PASSWORD)"
+    echo "    Claude key  : ${OMNI_CLIENT_KEY_FILE}"
   fi
   echo
-  echo -e "${C_BOLD}  MANAGEMENT COMMANDS (any terminal):${C_NC}"
-  echo "    freeagents up | down | restart | status | logs | uninstall"
-  echo "    freeagents          (re-opens this menu)"
+  echo "  Claude Code settings : %USERPROFILE%\\.claude\\settings.json"
+  echo "  Auto-start on boot   : ${AUTOSTART_MODE}"
+  echo "  Windows proxy        : ${WIN_PROXY_URL:-disabled}"
   echo
-  echo -e "${C_BOLD}  USEFUL COMMANDS (run inside WSL):${C_NC}"
-  echo "    Live logs        : ${SUDO} docker logs -f ${CONTAINER_NAME}"
-  echo "    Restart proxy    : ${SUDO} docker restart ${CONTAINER_NAME}"
-  echo "    Stop proxy       : ${SUDO} docker stop ${CONTAINER_NAME}"
-  echo "    Start proxy      : ${SUDO} docker start ${CONTAINER_NAME}"
-  echo "    Test endpoint    : curl -s http://127.0.0.1:${LITELLM_PORT}/v1/models \\"
-  echo "                         -H \"Authorization: Bearer ${MASTER_KEY}\""
-  local rerun="bash \"${SCRIPT_PATH}\""
-  case "$SCRIPT_PATH" in
-    /dev/fd/*|/dev/stdin|/dev/fd*)
-      rerun='bash <(curl -fsSL https://raw.githubusercontent.com/im-JvD/FreeAI-Agents/main/setup.sh)' ;;
-  esac
-  echo "    Re-run this tool : ${rerun}"
+  echo -e "${C_BOLD}  MANAGEMENT${C_NC}"
+  echo "    freeagents                 open this menu"
+  echo "    freeagents status          both gateways"
+  echo "    freeagents doctor          deep diagnosis (both)"
+  echo "    freeagents logs omniroute  live logs of the second engine"
   echo
-  echo -e "${C_BOLD}  NEXT STEPS (on WINDOWS):${C_NC}"
-  echo "    1. Install Claude Code (once):"
-  echo "       irm https://claude.ai/install.ps1 | iex"
-  echo "       (or: npm install -g @anthropic-ai/claude-code)"
-  echo "    2. Open a NEW terminal, cd into any project folder."
-  echo "    3. Run: claude"
-  echo "    4. Type /model to pick any proxy model (gateway discovery is on;"
-  echo "       needs Claude Code v2.1.129+). Default model preconfigured."
-  echo ""
-  echo -e "${C_BOLD}  CLAUDE DESKTOP APP (Cowork / Code inside the desktop app):${C_NC}"
-  case "$DESKTOP_POLICY_STATUS" in
-    ok)
-      echo "    ALREADY CONFIGURED automatically (registry policy:"
-      echo "    HKCU\\SOFTWARE\\Policies\\Claude). Just (re)start the app -"
-      echo "    the claude-* gateway models appear in Cowork's model picker."
-      ;;
-    failed)
-      echo "    AUTO-CONFIG FAILED - Windows denied the registry write (see WARN above)."
-      echo "    30-second manual setup inside the app:"
-      echo "      Help > Troubleshooting > Enable Developer Mode, then"
-      echo "      Developer > Configure Third-Party Inference > New configuration"
-      echo "      Name: LiteLLM | Gateway base URL: http://127.0.0.1:${LITELLM_PORT}"
-      echo "      Gateway API key: the Master Key above | Auth scheme: bearer | Apply"
-      ;;
-    off)
-      echo "    NOT auto-configured (LITELLM_DESKTOP_CONFIG=0). Manual setup:"
-      echo "      Developer Mode > Configure Third-Party Inference: gateway,"
-      echo "      http://127.0.0.1:${LITELLM_PORT}, Master Key, bearer."
-      ;;
-    *)
-      echo "    Could not auto-configure (powershell.exe not found). Manual setup:"
-      echo "      Developer Mode > Configure Third-Party Inference: gateway,"
-      echo "      http://127.0.0.1:${LITELLM_PORT}, Master Key, bearer."
-      ;;
-  esac
-  echo
-  echo "  NOTE: If you ever run 'wsl --shutdown', start Docker again with:"
-  echo "        sudo service docker start   (auto if systemd is enabled)"
+  echo -e "${C_BOLD}  NEXT STEPS (on WINDOWS)${C_NC}"
+  echo "    1. Install Claude Code (once):  irm https://claude.ai/install.ps1 | iex"
+  echo "    2. Open a NEW terminal and run: claude"
+  echo "    3. Pick the model with /model - it is listed as '${MODEL_ID}'"
+  echo "       (Claude Desktop shows it as '$(gateway_label "$gw")')."
   echo
   log_ok "Done. Happy coding!"
 }
 
 #-------------------------------------------------------------------------------
-# Full Uninstall
+# STATUS / DOCTOR / LOGS / CREDENTIALS - every command serves BOTH gateways
 #-------------------------------------------------------------------------------
-full_uninstall() {
+show_status() {
+  local gw; gw="$(active_gateway)"
   echo
-  log_info "=== FULL UNINSTALL: starting ==="
-  echo
-
-  # 1) Remove the LiteLLM container
-  if command -v docker >/dev/null 2>&1 && \
-     $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"; then
-    log_info "Stopping and removing container '${CONTAINER_NAME}'..."
-    $SUDO docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    $SUDO docker rm "$CONTAINER_NAME"   >/dev/null 2>&1 || true
-    log_ok "Container removed."
+  log_info "=== LITELLM (port ${LITELLM_PORT}) ==="
+  if litellm_installed; then
+    echo "  container : $(litellm_container_running && echo running || echo STOPPED)"
+    echo "  health    : HTTP $(litellm_health_code)"
+    echo "  dashboard : http://127.0.0.1:${LITELLM_PORT}/ui"
+    echo "  model id  : ${MODEL_ID}"
+    echo "  config    : ${LITELLM_CONFIG}"
   else
-    log_warn "No container named '${CONTAINER_NAME}' found - nothing to remove."
+    echo "  not installed"
   fi
 
-  # 1b) Remove the Admin UI database container + docker network
-  if command -v docker >/dev/null 2>&1; then
-    if $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$DB_CONTAINER"; then
-      $SUDO docker stop "$DB_CONTAINER" >/dev/null 2>&1 || true
-      $SUDO docker rm "$DB_CONTAINER"   >/dev/null 2>&1 || true
-      log_ok "Removed Admin UI database container: ${DB_CONTAINER}"
-    fi
-    $SUDO docker network rm "$DB_NETWORK" >/dev/null 2>&1 || true
-  fi
-
-  # 2) Remove the LiteLLM config folder in Linux
-  if [ -d "$LITELLM_DIR" ]; then
-    rm -rf "$LITELLM_DIR"
-    log_ok "Removed LiteLLM config folder: ${LITELLM_DIR}"
+  echo
+  log_info "=== OMNIROUTE (port ${OMNI_PORT}) ==="
+  if omni_installed; then
+    echo "  service   : $(omni_process_running && echo running || echo STOPPED)"
+    echo "  health    : HTTP $(omni_health_code)   (/healthz)"
+    echo "  dashboard : $(omni_base_url)"
+    echo "  model id  : ${MODEL_ID}"
+    echo "  data dir  : ${OMNI_DATA_DIR}"
   else
-    log_warn "LiteLLM config folder not found: ${LITELLM_DIR}"
+    echo "  not installed"
   fi
 
-  # 3) Remove Claude Code settings on the Windows side (restore backup if any)
-  if find_powershell >/dev/null 2>&1; then
-    local win_home cc_file
-    win_home="$(get_windows_home)" || win_home=""
-    if [ -n "$win_home" ] && [ -d "$win_home" ]; then
-      cc_file="${win_home}/.claude/settings.json"
-      if [ -f "$cc_file" ]; then
-        rm -f "$cc_file"
-        log_ok "Removed Claude Code settings: ${cc_file}"
-      else
-        log_warn "Claude Code settings not found: ${cc_file}"
-      fi
-      local newest_bak
-      newest_bak="$(ls -1t "${win_home}/.claude/settings.json.bak."* 2>/dev/null | head -1 || true)"
-      if [ -n "$newest_bak" ] && [ -f "$newest_bak" ]; then
-        cp "$newest_bak" "$cc_file"
-        log_ok "Restored pre-install backup: ${newest_bak}"
-      fi
-    else
-      log_warn "Could not resolve the Windows profile. Delete this file manually:"
-      log_warn "  %USERPROFILE%\\.claude\\settings.json"
-    fi
+  echo
+  if [ "$gw" = "omniroute" ]; then
+    log_info "=== CLAUDE (active gateway: OmniRoute) ==="
   else
-    log_warn "powershell.exe not found. Delete this file manually:"
-    log_warn "  %USERPROFILE%\\.claude\\settings.json"
+    log_info "=== CLAUDE (active gateway: LiteLLM) ==="
   fi
-
-  # 3b) Remove the Claude Desktop gateway policy (HKCU registry) and restore
-  #     the pre-install backup of that policy key if one exists
-  local ps_bin="" reg_bak_win="" win_home2="" newest_reg_bak
-  ps_bin="$(find_powershell 2>/dev/null || true)"
-  if [ -n "$ps_bin" ]; then
-    win_home2="$(get_windows_home 2>/dev/null || true)"
-    if [ -n "$win_home2" ] && [ -d "$win_home2" ]; then
-      newest_reg_bak="$(ls -1t "${win_home2}/.claude/claude_desktop_policy.reg.bak."* 2>/dev/null | head -1 || true)"
-      if [ -n "$newest_reg_bak" ] && [ -f "$newest_reg_bak" ]; then
-        reg_bak_win="$(wsl_to_win_path "$newest_reg_bak")"
-      fi
-    fi
-    "$ps_bin" -NoProfile -Command "Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceProvider' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceGatewayBaseUrl' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceCredentialKind' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceGatewayAuthScheme' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\SOFTWARE\\Policies\\Claude' -Name 'inferenceGatewayApiKey' -ErrorAction SilentlyContinue" >/dev/null 2>&1 \
-      && log_ok "Removed the legacy Claude Desktop registry policy" \
-      || log_warn "Could not clean the legacy Claude Desktop policy (registry)"
-          local la="" prof="" mta=""
-          la="$("$ps_bin" -NoProfile -Command "[Environment]::GetFolderPath('LocalApplicationData')" 2>/dev/null | tr -d '\r' | head -n1 || true)"
-          if [ -n "$la" ]; then
-            local ld llr
-            ld="${la%%:*}"; llr="$(printf '%s' "$ld" | tr '[:upper:]' '[:lower:]')"; la="${la#*:}"; la="${la//\\//}"
-            la="/mnt/${llr}${la}"
-            prof="${la}/Claude-3p/configLibrary/${DESKTOP_PROFILE_ID}.json"
-            mta="${la}/Claude-3p/configLibrary/_meta.json"
-            if [ -f "$prof" ]; then
-              rm -f "$prof"
-              log_ok "Removed the Claude Desktop profile: ${prof}"
-            fi
-            if [ -f "$mta" ] && command -v python3 >/dev/null 2>&1; then
-              CLAUDE_META_FILE="$mta" CLAUDE_PROFILE_ID="$DESKTOP_PROFILE_ID" python3 <<'PYMETA' || true
-    import json, os
-    p = os.environ["CLAUDE_META_FILE"]; pid = os.environ["CLAUDE_PROFILE_ID"]
-    try:
-        meta = json.load(open(p))
-    except Exception:
-        raise SystemExit(0)
-    entries = [e for e in (meta.get("entries") or []) if e.get("id") != pid]
-    meta["entries"] = entries
-    if meta.get("appliedId") == pid:
-        meta["appliedId"] = entries[0]["id"] if entries else None
-    json.dump(meta, open(p, "w"), indent=2)
-PYMETA
-            fi
-          fi
-  fi
-
-  # 4) Remove boot persistence (systemd service / wsl.conf boot entry / helper)
-  if $SUDO test -f "$SYSTEMD_UNIT"; then
-    $SUDO rm -f "$SYSTEMD_UNIT"
-    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
-    log_ok "Removed systemd service: ${SYSTEMD_UNIT}"
-  fi
-  if $SUDO test -f "$BOOT_HELPER"; then
-    $SUDO rm -f "$BOOT_HELPER"
-    log_ok "Removed boot helper: ${BOOT_HELPER}"
-  fi
-  if $SUDO test -f "$WSL_CONF" && $SUDO grep -qF "$BOOT_LINE" "$WSL_CONF" 2>/dev/null; then
-    $SUDO sed -i "\|^${BOOT_LINE}\$|d" "$WSL_CONF"
-    log_ok "Removed boot entry from ${WSL_CONF}"
-  fi
-
-  # 5) Remove the management CLI
-  if $SUDO test -f "$CLI_BIN"; then
-    $SUDO rm -f "$CLI_BIN"
-    log_ok "Removed management CLI: ${CLI_BIN}"
-  fi
-
-  echo
-  echo -e "${C_GREEN}${C_BOLD}================================================================="
-  echo "  UNINSTALL COMPLETED SUCCESSFULLY!"
-  echo -e "=================================================================${C_NC}"
-  echo
-  echo "  Removed:"
-  echo "    - Docker container : ${CONTAINER_NAME}"
-  echo "    - UI database      : ${DB_CONTAINER} (postgres) + network ${DB_NETWORK}"
-  echo "    - Linux folder     : ${LITELLM_DIR}  (config.yaml + master key)"
-  echo "    - Windows file     : ~/.claude/settings.json"
-  echo "    - Boot persistence : systemd service / wsl.conf boot entry / helper"
-  echo "    - Management CLI   : ${CLI_BIN}"
-  echo
-  echo "  Kept (on purpose):"
-  echo "    - Docker Engine itself and /etc/docker/daemon.json (mirrors)"
-  echo
-  log_ok "Done."
+  echo "  model id  : ${MODEL_ID}"
+  echo "  base URL  : http://127.0.0.1:$(gateway_port "$gw")"
+  echo "  switch    : menu item 8 -> 5, or: freeagents (menu) -> Config Manager"
+  return 0
 }
 
-#-------------------------------------------------------------------------------
-# OmniRoute engine (downloaded installer, cached under ~/.free-ai-agents)
-#-------------------------------------------------------------------------------
-ensure_omni_script() {
-  if [ -s "$OMNI_SCRIPT" ] && bash -n "$OMNI_SCRIPT" 2>/dev/null; then
+doctor_engine() { # $1 = litellm|omniroute
+  local engine="$1"
+  echo
+  echo "================================================="
+  echo "                 ${engine^^} DOCTOR"
+  echo "================================================="
+
+  if [ "$engine" = "litellm" ]; then
+    if ! litellm_installed; then echo "  not installed"; return 0; fi
+    echo "[STACK]"
+    echo "  container     : $(litellm_container_running && echo running || echo STOPPED)"
+    echo "  health        : HTTP $(litellm_health_code)"
+    if $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$DB_CONTAINER"; then
+      echo "  ui database   : $($SUDO docker inspect -f '{{.State.Status}}' "$DB_CONTAINER" 2>/dev/null || echo unknown)"
+    else
+      echo "  ui database   : not installed (UI login unavailable, chat still works)"
+    fi
+    echo "  windows proxy : ${WIN_PROXY_URL:-disabled}"
+    echo
+    echo "[PROVIDER KEYS]"
+    local p k
+    for p in $(all_provider_ids); do
+      k="$(provider_key "$p")"
+      if [ -n "$k" ]; then
+        printf '  %-16s: %s\n' "$(provider_label "$p")" "$(mask_key "$k")"
+      fi
+    done
+    [ "$(configured_provider_count)" -ge 1 ] || echo "  no keys configured"
+    echo
+    echo "[MODEL LIVE TEST]  POST /v1/chat/completions via ${MODEL_ID}"
+    local mk code body
+    mk="$(read_secret "$LITELLM_KEYFILE")"
+    if [ -z "$mk" ]; then echo "  master key missing"; return 1; fi
+    body="$(mktemp)"
+    code="$(curl -s -o "$body" -w '%{http_code}' --max-time "${FREEAGENTS_DOCTOR_TIMEOUT:-60}" \
+      -X POST -H "Authorization: Bearer ${mk}" -H 'Content-Type: application/json' \
+      -d "{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":8}" \
+      "http://127.0.0.1:${LITELLM_PORT}/v1/chat/completions" 2>/dev/null || true)"
+    if [ "$code" = "200" ]; then
+      echo "  OK   ${MODEL_ID}"
+    else
+      echo "  FAIL ${MODEL_ID} (HTTP ${code:-none}): $(head -c 200 "$body" 2>/dev/null | tr '\n' ' ')"
+      echo "  Hints:"
+      echo "   - 401/403 from a provider: the network is geo-blocked - enable the Windows"
+      echo "     proxy (menu 8 -> 1) or a VPN, then 'freeagents restart'."
+      echo "   - 'Invalid model name': the config lost the model group - re-run install."
+    fi
+    rm -f "$body" 2>/dev/null || true
     return 0
   fi
-  mkdir -p "$FREE_AGENTS_DIR" 2>/dev/null || true
-  local url tmp="${OMNI_SCRIPT}.dl" ok=1
-  for url in "${OMNI_RAW_URLS[@]}"; do
-    log_info "       Downloading the OmniRoute installer..."
-    if curl -fsSL --max-time 120 --retry 2 "$url" -o "$tmp" 2>/dev/null \
-       && bash -n "$tmp" 2>/dev/null; then
-      ok=0
-      break
-    fi
-  done
-  if [ "$ok" -ne 0 ]; then
-    rm -f "$tmp" 2>/dev/null || true
-    log_warn "       Could not download the OmniRoute installer (network?)."
-    return 1
+
+  if ! omni_installed; then echo "  not installed"; return 0; fi
+  echo "[STACK]"
+  echo "  service       : $(omni_process_running && echo running || echo STOPPED)"
+  echo "  health        : HTTP $(omni_health_code)   ($(omni_base_url)/healthz)"
+  echo "  data dir      : ${OMNI_DATA_DIR}"
+  echo "  log file      : ${OMNI_LOG_FILE}"
+  echo "  node          : $(node -v 2>/dev/null || echo missing)"
+  echo "  windows proxy : ${WIN_PROXY_URL:-disabled}"
+  echo
+  echo "[MODEL LIVE TEST]  POST /v1/messages via ${MODEL_ID}"
+  local token code2 body2
+  token="$(read_secret "$OMNI_CLIENT_KEY_FILE")"
+  [ -n "$token" ] || token="$(read_secret "$OMNI_MASTER_KEY_FILE")"
+  if [ -z "$token" ]; then echo "  no API key available"; return 1; fi
+  body2="$(mktemp)"
+  code2="$(curl -s -o "$body2" -w '%{http_code}' --max-time "${FREEAGENTS_DOCTOR_TIMEOUT:-60}" \
+    -H "Authorization: Bearer ${token}" -H 'anthropic-version: 2023-06-01' \
+    -H 'Content-Type: application/json' \
+    -X POST "$(omni_base_url)/v1/messages" \
+    -d "{\"model\":\"${MODEL_ID}\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" 2>/dev/null || true)"
+  if [ "$code2" = "200" ]; then
+    echo "  OK   ${MODEL_ID}"
+  else
+    echo "  FAIL ${MODEL_ID} (HTTP ${code2:-none}): $(head -c 200 "$body2" 2>/dev/null | tr '\n' ' ')"
+    echo "  Hints:"
+    echo "   - Add/enable providers in the dashboard: $(omni_base_url)"
+    echo "   - enable the Windows proxy (menu 8 -> 1) if providers are geo-blocked"
   fi
-  mv "$tmp" "$OMNI_SCRIPT"
-  chmod +x "$OMNI_SCRIPT" 2>/dev/null || true
-  log_ok "       OmniRoute installer ready: ${OMNI_SCRIPT}"
+  rm -f "$body2" 2>/dev/null || true
   return 0
 }
 
-omni_installed() { [ -s "$OMNI_SCRIPT" ]; }
-
-omni_delegate() { # $@ = args for the secondary gateway manager
-  omni_installed || { log_warn "Secondary gateway: not installed (item 1 installs it)."; return 0; }
-  log_info "--- secondary gateway ---"
-  bash "$OMNI_SCRIPT" "$@"
-}
-
-omni_quiet() { # <label> <args...> - run the secondary manager WITHOUT its logs
-  local label="$1"; shift
-  local logdir="${FREE_AGENTS_DIR}/logs"
-  mkdir -p "$logdir" 2>/dev/null || true
-  local lg="${logdir}/secondary-$(printf '%s' "$1" | tr -cd 'a-z').log"
-  # FORCE_NO_TTY + </dev/null: the installer must NEVER sit on an
-  # invisible interactive prompt (it would look like a hang).
-  if OMNIRoute_FORCE_NO_TTY=1 bash "$OMNI_SCRIPT" "$@" >"$lg" 2>&1 </dev/null; then
-    log_ok "${label} - done.  (details: ${lg})"
-  else
-    log_warn "${label} - FAILED. Last lines:"
-    tail -n 15 "$lg" 2>/dev/null || true
-    log_warn "Full log: ${lg}"
-  fi
-}
-
-omni_install_flow() {
-  # Install the secondary gateway REUSING the keys and the Windows proxy
-  # setting that were (or will be) collected exactly ONCE by this manager.
-  ensure_omni_script || return 1
-  log_info "=== SECONDARY ENGINE: installing with the SAME keys & proxy ==="
-
-  # Seed its saved-keys file so its installer does NOT ask again.
-  if [ -n "${GROQ_KEY:-}${OPENROUTER_KEY:-}${GEMINI_KEY:-}${CEREBRAS_KEY:-}${MISTRAL_KEY:-}" ]; then
-    {
-      echo "# Provider API keys (managed by setup.sh)"
-      [ -n "${GROQ_KEY:-}" ]       && printf 'GROQ_KEY=%q\n'       "$GROQ_KEY"
-      [ -n "${OPENROUTER_KEY:-}" ] && printf 'OPENROUTER_KEY=%q\n' "$OPENROUTER_KEY"
-      [ -n "${GEMINI_KEY:-}" ]     && printf 'GEMINI_KEY=%q\n'     "$GEMINI_KEY"
-      [ -n "${CEREBRAS_KEY:-}" ]   && printf 'CEREBRAS_KEY=%q\n'   "$CEREBRAS_KEY"
-      [ -n "${MISTRAL_KEY:-}" ]    && printf 'MISTRAL_KEY=%q\n'    "$MISTRAL_KEY"
-    } > "$SECONDARY_KEYS_FILE"
-    chmod 600 "$SECONDARY_KEYS_FILE" 2>/dev/null || true
-    log_ok "Provider tokens handed over: ${SECONDARY_KEYS_FILE}"
-  fi
-
-  local use_proxy=0
-  [ -n "$WIN_PROXY_URL" ] && use_proxy=1
-  local ilog="${FREE_AGENTS_DIR}/logs/secondary-install.log"
-  mkdir -p "${FREE_AGENTS_DIR}/logs" 2>/dev/null || true
-  log_info "Installing the secondary gateway (this can take a few minutes)..."
-  echo "    Watch live progress in a second terminal:  tail -f ${ilog}"
-  local rc=0 opid="" hpid=""
-  OMNIRoute_GROQ_KEY="${GROQ_KEY:-}" \
-  OMNIRoute_OPENROUTER_KEY="${OPENROUTER_KEY:-}" \
-  OMNIRoute_GEMINI_KEY="${GEMINI_KEY:-}" \
-  OMNIRoute_CEREBRAS_KEY="${CEREBRAS_KEY:-}" \
-  OMNIRoute_MISTRAL_KEY="${MISTRAL_KEY:-}" \
-  OMNIRoute_FORCE_NO_TTY=1 \
-  OMNIRoute_USE_PROXY="$use_proxy" \
-  OMNIRoute_PROXY_URL="${WIN_PROXY_URL}" \
-    timeout 1800 bash "$OMNI_SCRIPT" --install >"$ilog" 2>&1 </dev/null &
-  opid=$!
-  # heartbeat: one dot every 3s so the wait is visibly alive
-  { while kill -0 "$opid" 2>/dev/null; do printf '.'; sleep 3; done; } &
-  hpid=$!
-  if wait "$opid"; then rc=0; else rc=$?; fi
-  kill "$hpid" 2>/dev/null || true
-  wait "$hpid" 2>/dev/null || true
-  printf '\n'
-  if [ "$rc" -eq 0 ]; then
-    log_ok "Secondary gateway installed and activated."
-  elif [ "$rc" -eq 124 ]; then
-    log_warn "Secondary gateway installer TIMED OUT (30 min). Last lines:"
-    tail -n 15 "$ilog" 2>/dev/null || true
-    log_warn "Full log: ${ilog}"
-    return 1
-  else
-    log_warn "Secondary gateway installer FAILED. Last lines:"
-    tail -n 15 "$ilog" 2>/dev/null || true
-    log_warn "Full log: ${ilog}"
-    return 1
-  fi
-  echo -e "${C_BOLD}  SECONDARY GATEWAY REPORT:${C_NC}"
-  echo "    Dashboard : http://127.0.0.1:20128"
-  local pw=""
-  if [ -f "${HOME}/omniroute-data/.env" ]; then
-    pw="$(grep -E '^INITIAL_PASSWORD=' "${HOME}/omniroute-data/.env" 2>/dev/null | cut -d= -f2- || true)"
-  fi
-  if [ -n "$pw" ]; then
-    echo "    Password  : ${pw}   (username: admin)"
-  else
-    echo "    Password  : see ${HOME}/omniroute-data/.env (INITIAL_PASSWORD)"
-  fi
-  echo "    Data dir  : ${HOME}/omniroute-data"
-  return 0
-}
-
-#-------------------------------------------------------------------------------
-# UPDATE: re-download this script from the repo, then full reinstall
-#-------------------------------------------------------------------------------
-cmd_update() {
-  printf "   Re-download the script AND run the full reinstall? Keys and the"
-  printf "   Windows proxy setting are KEPT. Continue? [y/N]: "
-  local answer=""
-  read -r answer || answer=""
-  case "$answer" in
-    y|Y|yes|Yes|YES) : ;;
-    *) log_info "Update cancelled."; return 0 ;;
+cmd_doctor() { # $1 optional engine
+  load_windows_proxy
+  load_provider_keys || true
+  case "${1:-all}" in
+    litellm)   doctor_engine litellm ;;
+    omniroute|omni) doctor_engine omniroute ;;
+    *) doctor_engine litellm; doctor_engine omniroute ;;
   esac
-  log_info "=== UPDATE: downloading the latest ${FREE_AGENTS_VERSION:-} script from the repo ==="
-  mkdir -p "$FREE_AGENTS_DIR" 2>/dev/null || true
-  local url tmp="${FREE_AGENTS_DIR}/setup.sh.new" ok=1
-  for url in "${SELF_RAW_URLS[@]}"; do
-    if curl -fsSL --max-time 120 --retry 2 "$url" -o "$tmp" 2>/dev/null; then
-      ok=0
-      break
-    fi
-  done
-  if [ "$ok" -ne 0 ]; then
-    log_warn "Update FAILED - could not download the script (network)."
-    log_warn "Keeping the current version."
-    return 1
-  fi
-  if ! bash -n "$tmp" 2>/dev/null; then
-    log_warn "Downloaded script failed the syntax check - keeping the current version."
-    rm -f "$tmp"
-    return 1
-  fi
-  if cmp -s "$tmp" "${SCRIPT_PATH}" 2>/dev/null; then
-    log_ok "Script is already up to date."
-    rm -f "$tmp"
-  else
-    mv "$tmp" "${SCRIPT_PATH}"
-    chmod +x "${SCRIPT_PATH}" 2>/dev/null || true
-    log_ok "Script updated: ${SCRIPT_PATH}"
-  fi
-  log_info "=== Re-running the FULL INSTALL (keys & proxy are KEPT) ==="
-  full_install
+  return 0
 }
 
-#-------------------------------------------------------------------------------
-# CONFIG MANAGER: proxy on/off + key editing + Claude re-config
-#-------------------------------------------------------------------------------
-apply_proxy_to_litellm() {
-  # Recreate the primary gateway container with the CURRENT proxy setting
-  # (WIN_PROXY_URL), keeping every stored provider key.
-  if ! main_container_exists; then
-    log_warn "Primary gateway is not installed (item 1 installs it)."
-    return 1
+cmd_status() { load_windows_proxy; load_provider_keys || true; show_status; }
+
+cmd_credentials() {
+  echo
+  if litellm_installed; then
+    local mk; mk="$(read_secret "$LITELLM_KEYFILE")"
+    echo "  LiteLLM"
+    echo "    Dashboard : http://127.0.0.1:${LITELLM_PORT}/ui   (user: admin)"
+    echo "    Password  : ${mk}"
+    echo "    API key   : ${mk}"
+    echo "    Model id  : ${MODEL_ID}"
+  else
+    echo "  LiteLLM: not installed"
   fi
-  GROQ_KEY=""; OPENROUTER_KEY=""; GEMINI_KEY=""; CEREBRAS_KEY=""; MISTRAL_KEY=""
-  if read_existing_keys_from_container; then
-    GROQ_KEY="$EXISTING_GROQ"; OPENROUTER_KEY="$EXISTING_OPENROUTER"
-    GEMINI_KEY="$EXISTING_GEMINI"; CEREBRAS_KEY="$EXISTING_CEREBRAS"
-    MISTRAL_KEY="$EXISTING_MISTRAL"
+  echo
+  if omni_installed; then
+    local pass ck
+    pass="$(get_env_line "$OMNI_ENV_FILE" INITIAL_PASSWORD || true)"
+    ck="$(read_secret "$OMNI_CLIENT_KEY_FILE")"
+    [ -n "$ck" ] || ck="$(read_secret "$OMNI_MASTER_KEY_FILE")"
+    echo "  OmniRoute"
+    echo "    Dashboard : $(omni_base_url)   (user: admin)"
+    echo "    Password  : ${pass:-see ${OMNI_ENV_FILE}}"
+    echo "    API key   : ${ck}"
+    echo "    Model id  : ${MODEL_ID}"
+  else
+    echo "  OmniRoute: not installed"
   fi
-  [ -s "$LITELLM_KEYFILE" ] && MASTER_KEY="$(tr -d '\n' < "$LITELLM_KEYFILE")"
+  echo
+  echo "  Claude uses the ACTIVE gateway: $(active_gateway) (switch: menu 8 -> 5)"
+}
+
+cmd_up()      { load_windows_proxy; load_provider_keys || true; log_info "=== START ==="; start_litellm_engine || true; start_omni_engine || true; }
+cmd_down()    { log_info "=== STOP ==="; stop_litellm_engine || true; stop_omni_engine || true; }
+cmd_restart() { load_windows_proxy; load_provider_keys || true; log_info "=== RESTART ==="; restart_litellm_engine || true; restart_omni_engine || true; }
+
+cmd_logs() { # $1 optional engine
+  case "${1:-litellm}" in
+    omniroute|omni)
+      if omni_installed; then
+        echo "Following the OmniRoute log (Ctrl+C to exit)..."
+        [ -f "$OMNI_LOG_FILE" ] && tail -f "$OMNI_LOG_FILE" || { echo "no log yet: ${OMNI_LOG_FILE}"; }
+      else
+        log_warn "OmniRoute: not installed."
+      fi
+      ;;
+    *)
+      if litellm_installed; then
+        echo "Following the LiteLLM container log (Ctrl+C to exit)..."
+        $SUDO docker logs -f --tail 100 "$CONTAINER_NAME"
+      else
+        log_warn "LiteLLM: not installed."
+      fi
+      ;;
+  esac
+  return 0
+}
+
+#===============================================================================
+# Re-apply changes to the running engines (used by the Config Manager)
+#===============================================================================
+rebuild_litellm() {
+  litellm_installed || { log_warn "LiteLLM: not installed."; return 1; }
+  [ -s "$LITELLM_KEYFILE" ] && MASTER_KEY="$(read_secret "$LITELLM_KEYFILE")"
+  generate_litellm_config
   build_docker_env_args
   remove_existing_container
   start_litellm_container
   wait_for_litellm
-  log_ok "Primary gateway recreated. Proxy is now: ${WIN_PROXY_URL:-OFF (direct)}"
+  log_ok "LiteLLM: container rebuilt with the current keys/proxy."
   return 0
 }
 
-configure_windows_proxy_force() {
-  # Ask for a Windows proxy address unconditionally (Config Manager ON).
-  local detected="" addr="" code=""
-  detected="$(detect_windows_ip || true)"
-  local suggestion=""
-  [ -n "$detected" ] && suggestion="${detected}:7890"
-  if [ -n "$suggestion" ]; then
-    printf "       Proxy address as IP:PORT seen from WSL [%s]: " "$suggestion"
-  else
-    printf "       Proxy address as IP:PORT seen from WSL (e.g. 172.20.144.1:7890): "
+apply_omni_config() {
+  omni_installed || { log_warn "OmniRoute: not installed."; return 1; }
+  write_omni_env
+  # restart FIRST so the fresh .env (port, proxy, ...) is live, then apply the
+  # managed configuration to that instance
+  if omni_process_running; then
+    restart_omni_engine >/dev/null 2>&1 || true
   fi
-  read -r addr || addr=""
-  [ -z "$addr" ] && addr="$suggestion"
-  [ -z "$addr" ] && { log_warn "No address entered."; return 0; }
-  case "$addr" in
-    http://*|https://*|socks5://*|socks5h://*) : ;;
-    *) addr="http://${addr}" ;;
-  esac
-  code=""
-  if command -v curl >/dev/null 2>&1; then
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -x "$addr" "https://api.groq.com/openai/v1/models" 2>/dev/null || true)"
-  fi
-  if [ -n "$code" ] && [ "$code" != "000" ]; then
-    log_ok "       Proxy reachable - test call returned HTTP ${code}."
-  else
-    log_warn "       Test call through the proxy FAILED (code ${code:-none})."
-    printf "       Save it anyway? [y/N]: "
-    local a2=""
-    read -r a2 || a2=""
-    case "$a2" in
-      y|Y|yes|Yes|YES) : ;;
-      *) log_warn "Proxy not saved."; return 0 ;;
-    esac
-  fi
-  WIN_PROXY_URL="$addr"
-  mkdir -p "$LITELLM_DIR"
-  printf '%s\n' "$WIN_PROXY_URL" > "$WIN_PROXY_FILE"
-  chmod 600 "$WIN_PROXY_FILE" 2>/dev/null || true
+  configure_omniroute
+  log_ok "OmniRoute: configuration applied."
+  return 0
 }
 
-switch_desktop_profile() {
-  # Point the Claude Desktop app at a different saved configuration
-  # (the UI can refuse to Apply; this edits _meta.json directly).
-  local ps=""
-  ps="$(find_powershell 2>/dev/null || true)"
-  if [ -z "$ps" ]; then
-    log_warn "powershell.exe not found - cannot locate the desktop profile library."
+set_proxy_on() {
+  configure_windows_proxy
+  [ -n "$WIN_PROXY_URL" ] || return 1
+  rebuild_litellm || true
+  apply_omni_config || true
+  return 0
+}
+
+set_proxy_off() {
+  rm -f "$WIN_PROXY_FILE" 2>/dev/null || true
+  WIN_PROXY_URL=""
+  log_ok "Windows proxy disabled (direct connections)."
+  rebuild_litellm || true
+  apply_omni_config || true
+  return 0
+}
+
+rekey_flow() {
+  log_info "Re-entering provider keys (the Windows proxy setting is KEPT)..."
+  FREEAGENTS_PROXY_MODE="keep"
+  FREEAGENTS_FRESH_KEYS="1"   # ENTER really skips here (no stored value reload)
+  KEY_GROQ=""; KEY_OPENROUTER=""; KEY_GEMINI=""; KEY_CEREBRAS=""; KEY_MISTRAL=""
+  KEY_GITHUB=""; KEY_SAMBANOVA=""; KEY_NVIDIA_NIM=""; KEY_TOGETHER_AI=""
+  collect_keys
+  FREEAGENTS_FRESH_KEYS="0"
+  rebuild_litellm || true
+  apply_omni_config || true
+  return 0
+}
+
+switch_active_gateway() {
+  local cur other
+  cur="$(active_gateway)"
+  if [ "$cur" = "litellm" ]; then other="omniroute"; else other="litellm"; fi
+  local other_ok=0
+  [ "$other" = "litellm" ] && litellm_installed && other_ok=1
+  [ "$other" = "omniroute" ] && omni_installed && other_ok=1
+  if [ "$other_ok" -ne 1 ]; then
+    log_warn "The other gateway (${other}) is not installed - nothing to switch to."
     return 1
   fi
-  local local_app=""
-  local_app="$($ps -NoProfile -Command "[Environment]::GetFolderPath('LocalApplicationData')" 2>/dev/null | tr -d '\r' | head -n1 || true)"
-  if [ -n "$local_app" ]; then
-    local drive letter rest
-    drive="${local_app%%:*}"
-    letter="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
-    rest="${local_app#*:}"; rest="${rest//\\//}"
-    local_app="/mnt/${letter}${rest}"
-  fi
-  local meta="${local_app}/Claude-3p/configLibrary/_meta.json"
-  if [ ! -f "$meta" ]; then
-    log_warn "No desktop profile library found at ${local_app}/Claude-3p/configLibrary"
-    return 1
-  fi
-  CLAUDE_META_FILE="$meta" CLAUDE_PROFILE_ID="$DESKTOP_PROFILE_ID" python3 <<'PYSW' || true
-import json, os, sys
-p = os.environ["CLAUDE_META_FILE"]; mine = os.environ["CLAUDE_PROFILE_ID"]
+  set_active_gateway "$other"
+  configure_claude_all "$other"
+  local pid
+  if [ "$other" = "omniroute" ]; then pid="$DESKTOP_PROFILE_ID_OMNI"; else pid="$DESKTOP_PROFILE_ID_LITELLM"; fi
+  local local_app meta
+  local_app="$(get_windows_localappdata 2>/dev/null || true)"
+  meta="${local_app}/Claude-3p/configLibrary/_meta.json"
+  if [ -f "$meta" ] && have python3; then
+    FA_META="$meta" FA_PID="$pid" python3 - <<'PYEOF'
+import json, os
+path = os.environ["FA_META"]; pid = os.environ["FA_PID"]
 try:
-    m = json.load(open(p))
+    meta = json.load(open(path, encoding="utf-8"))
 except Exception:
-    print("meta file is not valid JSON"); sys.exit(1)
-es = m.get("entries") or []
-others = [e.get("id") for e in es if e.get("id") and e.get("id") != mine]
-if not others:
-    print("no other saved desktop profile found"); sys.exit(1)
-m["appliedId"] = others[0]
-json.dump(m, open(p, "w"), indent=2)
-print("switched-applied-id")
-PYSW
-  log_ok "Active desktop profile switched to the other saved configuration."
-  log_warn "Fully QUIT the Claude Desktop app (tray icon -> Quit), then start it again."
+    raise SystemExit(0)
+entries = meta.get("entries") or []
+if any(e.get("id") == pid for e in entries):
+    meta["appliedId"] = pid
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+        fh.write("\n")
+PYEOF
+  fi
+  log_warn "Fully quit and restart the Claude apps so they pick up the new gateway."
   return 0
 }
 
@@ -2256,198 +2802,313 @@ config_manager() {
   while true; do
     echo
     echo -e "${C_CYAN}${C_BOLD}  --- CONFIG MANAGER ---${C_NC}"
-    echo -e "   ${C_GREEN}1${C_NC} - Gateway proxy ${C_YELLOW}ON${C_NC}   (route ALL engine traffic via your Windows proxy)"
-    echo -e "   ${C_GREEN}2${C_NC} - Gateway proxy ${C_YELLOW}OFF${C_NC}  (direct connections)"
-    echo -e "   ${C_GREEN}3${C_NC} - Re-enter provider tokens (applied to BOTH engines)"
-    echo -e "   ${C_GREEN}4${C_NC} - Re-apply Claude configs (CLI settings.json + desktop profile)"
-    echo -e "   ${C_GREEN}5${C_NC} - Switch the ACTIVE desktop profile (Free Agents / other)"
+    echo -e "   ${C_GREEN}1${C_NC} - Windows proxy ${C_YELLOW}ON${C_NC}   (route ALL gateway traffic via your proxy)"
+    echo -e "   ${C_GREEN}2${C_NC} - Windows proxy ${C_YELLOW}OFF${C_NC}  (direct connections)"
+    echo -e "   ${C_GREEN}3${C_NC} - Re-enter provider tokens (applied to BOTH gateways)"
+    echo -e "   ${C_GREEN}4${C_NC} - Re-apply Claude configs (settings.json + desktop profiles)"
+    echo -e "   ${C_GREEN}5${C_NC} - Switch the ACTIVE gateway / desktop profile"
     echo -e "   ${C_GREEN}0${C_NC} - Back"
     local c=""
     read -r -p "   Config choice: " c || c="0"
     echo
     case "$c" in
-      1)
-        configure_windows_proxy_force
-        if [ -n "$WIN_PROXY_URL" ]; then
-          apply_proxy_to_litellm
-          if omni_installed; then
-            OMNIRoute_USE_PROXY=1 OMNIRoute_PROXY_URL="$WIN_PROXY_URL" \
-              omni_quiet "Secondary gateway: proxy ON" --proxy on
-          fi
-        fi
-        ;;
-      2)
-        rm -f "$WIN_PROXY_FILE" 2>/dev/null || true
-        WIN_PROXY_URL=""
-        log_ok "Windows proxy disabled (direct connections)."
-        apply_proxy_to_litellm
-        if omni_installed; then
-          OMNIRoute_USE_PROXY=0 omni_quiet "Secondary gateway: proxy OFF" --proxy off
-        fi
-        ;;
-      3)
-        log_info "Re-entering provider tokens (proxy setting is KEPT)..."
-        LITELLM_FORCE_REKEY=1 full_install
-        if omni_installed; then
-          log_info "Applying the same tokens to the secondary gateway..."
-          omni_install_flow
-        fi
-        ;;
-      4)
-        CLAUDE_SETTINGS=""
-        configure_claude_windows
-        configure_claude_desktop_windows
-        ;;
-      5)
-        switch_desktop_profile
-        ;;
+      1) set_proxy_on ;;
+      2) set_proxy_off ;;
+      3) rekey_flow ;;
+      4) configure_claude_all "$(active_gateway)" ;;
+      5) switch_active_gateway ;;
       0|q|Q) return 0 ;;
       *) log_warn "Invalid choice: '${c}'." ;;
     esac
   done
 }
 
-#-------------------------------------------------------------------------------
-# Interactive menu (Free AI Agents)
-#-------------------------------------------------------------------------------
+#===============================================================================
+# UPDATE: re-download from THIS repository, then reinstall (keys kept)
+#===============================================================================
+cmd_update() {
+  printf "   Re-download the manager from %s and reinstall? Keys and the\n" "$REPO"
+  printf "   Windows proxy setting are KEPT. Continue? [y/N]: "
+  local answer=""
+  read -r answer || answer=""
+  case "$answer" in
+    y|Y|yes|Yes|YES) : ;;
+    *) log_info "Update cancelled."; return 0 ;;
+  esac
+  log_info "=== UPDATE: downloading the latest script from ${REPO} ==="
+  local tmp="${STATE_DIR}/setup.sh.new" ok=1 url
+  ensure_state_dirs
+  for url in "${SELF_RAW_URLS[@]}"; do
+    if curl -fsSL --max-time 120 --retry 2 "$url" -o "$tmp" 2>/dev/null; then ok=0; break; fi
+  done
+  if [ "$ok" -ne 0 ]; then
+    log_warn "Update FAILED - could not download the script (network)."
+    return 1
+  fi
+  if ! bash -n "$tmp" 2>/dev/null; then
+    log_warn "Downloaded script failed the syntax check - keeping the current version."
+    rm -f "$tmp"
+    return 1
+  fi
+  if cmp -s "$tmp" "$SCRIPT_PATH" 2>/dev/null; then
+    log_ok "Script is already up to date."
+    rm -f "$tmp"
+  else
+    mv "$tmp" "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH" 2>/dev/null || true
+    log_ok "Script updated: ${SCRIPT_PATH}"
+  fi
+  cp -f "$SCRIPT_PATH" "$MANAGER_COPY" 2>/dev/null || true
+  chmod 755 "$MANAGER_COPY" 2>/dev/null || true
+
+  load_provider_keys || true
+  load_windows_proxy
+  log_info "=== Re-running the installation (keys & proxy are KEPT) ==="
+  local engine="both"
+  [ "$(configured_provider_count)" -ge 1 ] || log_warn "No stored provider keys - the installer will ask again."
+  if ! litellm_installed && omni_installed; then engine="omniroute"; fi
+  if litellm_installed && ! omni_installed; then engine="litellm"; fi
+  full_install "$engine"
+}
+
+#===============================================================================
+# REMOVE - full wipe of everything this installer created (BOTH gateways)
+#===============================================================================
+full_uninstall() { # $1 optional --yes
+  local assume_yes="${1:-}"
+  if [ "$assume_yes" != "--yes" ] && [ "$assume_yes" != "-y" ]; then
+    printf "   This removes BOTH gateways, all configs, the Claude wiring and\n"
+    printf "   the freeagents command. Continue? [y/N]: "
+    local answer=""
+    read -r answer || answer=""
+    case "$answer" in
+      y|Y|yes|YES) : ;;
+      *) log_info "Aborted."; return 1 ;;
+    esac
+  fi
+  echo
+  log_info "=== FULL UNINSTALL ==="
+
+  # 1) LiteLLM
+  if have docker; then
+    if $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"; then
+      $SUDO docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+      $SUDO docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+      log_ok "LiteLLM container removed."
+    fi
+    if $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$DB_CONTAINER"; then
+      $SUDO docker stop "$DB_CONTAINER" >/dev/null 2>&1 || true
+      $SUDO docker rm "$DB_CONTAINER" >/dev/null 2>&1 || true
+      log_ok "LiteLLM database container removed."
+    fi
+    $SUDO docker network rm "$DB_NETWORK" >/dev/null 2>&1 || true
+    # leftovers from the legacy OmniRoute installer (Docker mode)
+    if $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "omniroute-app"; then
+      $SUDO docker stop omniroute-app >/dev/null 2>&1 || true
+      $SUDO docker rm omniroute-app >/dev/null 2>&1 || true
+      log_ok "Removed the legacy OmniRoute container."
+    fi
+  fi
+
+  # 2) OmniRoute (npm mode)
+  stop_omni_service >/dev/null 2>&1 || true
+  if have pm2; then
+    pm2 delete omniroute >/dev/null 2>&1 && log_ok "Removed the legacy pm2 process." || true
+    pm2 save >/dev/null 2>&1 || true
+  fi
+  if [ -f "$SYSTEMD_UNIT_OMNI" ]; then
+    $SUDO systemctl disable omniroute.service >/dev/null 2>&1 || true
+    $SUDO rm -f "$SYSTEMD_UNIT_OMNI"
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    log_ok "Removed the OmniRoute systemd unit."
+  fi
+  if [ "${FREEAGENTS_KEEP_NPM:-0}" = "1" ]; then
+    log_info "Keeping the omniroute npm package (FREEAGENTS_KEEP_NPM=1)."
+  elif have npm && have omniroute; then
+    $SUDO npm uninstall -g "$OMNI_NPM_PACKAGE" >/dev/null 2>&1 && log_ok "Removed the omniroute npm package." || \
+      log_warn "Could not remove the omniroute npm package (remove it manually if you want)."
+  fi
+
+  # 3) LiteLLM config + our state
+  if [ -d "$LITELLM_DIR" ]; then
+    rm -rf "$LITELLM_DIR" && log_ok "Removed ${LITELLM_DIR}"
+  fi
+  if [ -d "$OMNI_DATA_DIR" ]; then
+    rm -rf "$OMNI_DATA_DIR" && log_ok "Removed ${OMNI_DATA_DIR}"
+  fi
+  local d
+  for d in "${LEGACY_DIRS[@]}"; do
+    [ -d "$d" ] || continue
+    case "$d" in
+      "$OMNI_DATA_DIR") continue ;;
+    esac
+    rm -rf "$d" 2>/dev/null && log_info "Removed legacy dir ${d}" || true
+  done
+
+  # 4) Claude wiring on the Windows side
+  if windows_integration_available; then
+    local wh cc newest
+    wh="$(get_windows_home 2>/dev/null || true)"
+    if [ -n "$wh" ] && [ -d "$wh" ]; then
+      cc="${wh}/.claude/settings.json"
+      if [ -f "$cc" ]; then
+        if have python3; then
+          FA_SETTINGS="$cc" python3 - <<'PYEOF' || rm -f "$cc"
+import json, os
+path = os.environ["FA_SETTINGS"]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except Exception:
+    data = {}
+env = data.get("env")
+changed = False
+if isinstance(env, dict):
+    for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"):
+        if key in env:
+            env.pop(key, None)
+            changed = True
+if not env:
+    data.pop("env", None)
+else:
+    data["env"] = env
+if changed:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    print("clean")
+PYEOF
+        fi
+        log_ok "Removed the gateway settings from Claude Code settings.json"
+      fi
+      newest="$(ls -1t "${wh}/.claude/settings.json.bak."* 2>/dev/null | head -1 || true)"
+      if [ -n "$newest" ] && [ -f "$newest" ]; then
+        cp "$newest" "$cc" && log_ok "Restored pre-install backup: ${newest}"
+      fi
+    fi
+    local la lib
+    la="$(get_windows_localappdata 2>/dev/null || true)"
+    if [ -n "$la" ]; then
+      lib="${la}/Claude-3p/configLibrary"
+      local id
+      for id in "$DESKTOP_PROFILE_ID_LITELLM" "$DESKTOP_PROFILE_ID_OMNI"; do
+        if [ -f "${lib}/${id}.json" ]; then
+          rm -f "${lib}/${id}.json" && log_ok "Removed desktop profile ${id}"
+        fi
+      done
+      if [ -f "${lib}/_meta.json" ] && have python3; then
+        FA_META="${lib}/_meta.json" FA_ID1="$DESKTOP_PROFILE_ID_LITELLM" FA_ID2="$DESKTOP_PROFILE_ID_OMNI" python3 - <<'PYEOF' || true
+import json, os
+path = os.environ["FA_META"]
+ids = {os.environ["FA_ID1"], os.environ["FA_ID2"]}
+try:
+    meta = json.load(open(path, encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+entries = [e for e in (meta.get("entries") or []) if e.get("id") not in ids]
+meta["entries"] = entries
+if meta.get("appliedId") in ids:
+    meta["appliedId"] = entries[0]["id"] if entries else None
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(meta, fh, indent=2)
+    fh.write("\n")
+PYEOF
+      fi
+    fi
+  fi
+
+  # 5) boot persistence + CLI + state
+  if [ -f "$SYSTEMD_UNIT_LITELLM" ]; then
+    $SUDO systemctl disable litellm.service >/dev/null 2>&1 || true
+    $SUDO rm -f "$SYSTEMD_UNIT_LITELLM"
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    log_ok "Removed the litellm systemd unit."
+  fi
+  if $SUDO test -f "$BOOT_HELPER"; then
+    $SUDO rm -f "$BOOT_HELPER" && log_ok "Removed the boot helper."
+  fi
+  if $SUDO test -f "$WSL_CONF" && $SUDO grep -qF "$BOOT_LINE" "$WSL_CONF" 2>/dev/null; then
+    $SUDO sed -i "\|^${BOOT_LINE}\$|d" "$WSL_CONF"
+    log_ok "Removed the boot entry from ${WSL_CONF}."
+  fi
+  local b
+  for b in "${LEGACY_CLI_BINS[@]}" "$CLI_BIN"; do
+    $SUDO test -f "$b" && { $SUDO rm -f "$b"; log_ok "Removed ${b}"; }
+  done
+  if [ -d "$STATE_DIR" ]; then
+    rm -rf "$STATE_DIR" && log_ok "Removed ${STATE_DIR}"
+  fi
+
+  echo
+  echo -e "${C_GREEN}${C_BOLD}================================================================="
+  echo "  UNINSTALL COMPLETED SUCCESSFULLY!"
+  echo -e "=================================================================${C_NC}"
+  echo "  Removed: LiteLLM container + DB, OmniRoute service/package, both"
+  echo "  gateway configs, the Claude wiring, boot persistence and freeagents."
+  echo "  Kept: Docker itself, /etc/docker/daemon.json and pulled images."
+  echo
+  log_ok "Done."
+  return 0
+}
+
+#===============================================================================
+# Interactive menu
+#===============================================================================
 show_menu() {
   echo
   echo -e "${C_BLUE}${C_BOLD}================================================================="
   echo -e "=================================================================${C_NC}"
   echo -e "            ${C_GREEN}${C_BOLD}Free AI Agents${C_NC}${C_GREEN}  |  Local AI Gateway Manager${C_NC}"
-  echo -e "            ${C_YELLOW}BOT Version [ ${FREE_AGENTS_VERSION} ]${C_NC}"
+  echo -e "            ${C_YELLOW}Version [ ${FREE_AGENTS_VERSION} ]${C_NC}   LiteLLM + OmniRoute"
   echo -e "${C_BLUE}${C_BOLD}================================================================="
   echo -e "=================================================================${C_NC}"
   echo
   echo -e "   ${C_GREEN}1${C_NC} - ${C_YELLOW}Install${C_NC}  ( LiteLLM / OmniRoute / Both )"
-  echo -e "   ${C_GREEN}2${C_NC} - Start / Restart"
-  echo -e "   ${C_GREEN}3${C_NC} - Stop"
-  echo -e "   ${C_GREEN}4${C_NC} - ${C_YELLOW}Update${C_NC} ( re-download script + full reinstall, keeps keys & proxy )"
-  echo -e "   ${C_GREEN}5${C_NC} - Show Status"
-  echo -e "   ${C_GREEN}6${C_NC} - ${C_RED}Remove${C_NC} ( Full wipe )"
-  echo -e "   ${C_GREEN}7${C_NC} - Show Live Logs"
-  echo -e "   ${C_GREEN}8${C_NC} - ${C_CYAN}Config Manager${C_NC} ( proxy on/off - edit tokens - re-apply Claude config )"
+  echo -e "   ${C_GREEN}2${C_NC} - Start / Restart  ( both gateways )"
+  echo -e "   ${C_GREEN}3${C_NC} - Stop             ( both gateways )"
+  echo -e "   ${C_GREEN}4${C_NC} - ${C_YELLOW}Update${C_NC} ( re-download from the repo + reinstall, keeps keys )"
+  echo -e "   ${C_GREEN}5${C_NC} - Show Status      ( both gateways )"
+  echo -e "   ${C_GREEN}6${C_NC} - ${C_RED}Remove${C_NC} ( full wipe, both gateways )"
+  echo -e "   ${C_GREEN}7${C_NC} - Show Live Logs   ( LiteLLM / OmniRoute )"
+  echo -e "   ${C_GREEN}8${C_NC} - ${C_CYAN}Doctor${C_NC} ( deep diagnosis, both gateways )"
+  echo -e "   ${C_GREEN}9${C_NC} - ${C_CYAN}Config Manager${C_NC} ( proxy - tokens - Claude config - active gateway )"
   echo -e "   ${C_GREEN}0${C_NC} - ${C_BOLD}Exit${C_NC} ( CTRL + C )"
   echo
 }
 
 choose_and_install() {
   echo
-  echo -e "${C_BOLD}   Which engine(s) do you want to install?${C_NC}"
-  echo -e "     ${C_GREEN}1${C_NC} - ${C_BOLD}LiteLLM${C_NC} proxy   (Docker, port ${LITELLM_PORT})   [default]"
-  echo -e "     ${C_GREEN}2${C_NC} - ${C_BOLD}OmniRoute${C_NC}        (Docker/Node, port 20128)"
+  echo -e "${C_BOLD}   Which gateway(s) do you want to install?${C_NC}"
+  echo -e "     ${C_GREEN}1${C_NC} - ${C_BOLD}LiteLLM${C_NC}   (Docker, port ${LITELLM_PORT})          [default]"
+  echo -e "     ${C_GREEN}2${C_NC} - ${C_BOLD}OmniRoute${C_NC} (npm package, port ${OMNI_PORT})"
   echo -e "     ${C_GREEN}3${C_NC} - ${C_BOLD}Both${C_NC}"
   local c=""
-  read -r -p "   Engine choice [1/2/3]: " c || c="1"
+  read -r -p "   Gateway choice [1/2/3]: " c || c="1"
   echo
   case "$c" in
-    2)
-      omni_install_flow
-      ;;
-    3)
-      full_install
-      log_ok "LiteLLM engine ready - installing OmniRoute next..."
-      omni_install_flow
-      ;;
-    *)
-      full_install
-      ;;
+    2) full_install omniroute ;;
+    3) full_install both ;;
+    *) full_install litellm ;;
   esac
 }
 
-main_container_exists() {
-  $SUDO docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"
-}
-
-main_container_running() {
-  $SUDO docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"
-}
-
-eng_start() {
-  log_info "=== START / RESTART ==="
-  if main_container_exists; then
-    if main_container_running; then
-      $SUDO docker restart "$CONTAINER_NAME" >/dev/null
-    else
-      $SUDO docker start "$CONTAINER_NAME" >/dev/null
-    fi
-    wait_for_litellm
-    log_ok "Primary gateway is up: http://127.0.0.1:${LITELLM_PORT}"
-  else
-    log_warn "Primary gateway is not installed (item 1 installs it)."
-  fi
-  if omni_installed; then
-    omni_quiet "Secondary gateway: restart" --restart
-  fi
-}
-
-eng_stop() {
-  log_info "=== STOP ==="
-  if main_container_exists; then
-    $SUDO docker stop "$CONTAINER_NAME" >/dev/null
-    log_ok "Primary gateway stopped."
-  else
-    log_warn "Primary gateway is not installed."
-  fi
-  if omni_installed; then
-    omni_quiet "Secondary gateway: stop" --down
-  fi
-}
-
-eng_status() {
-  echo
-  log_info "=== PRIMARY GATEWAY (port ${LITELLM_PORT}) ==="
-  if main_container_exists; then
-    if main_container_running; then
-      echo "  container : running"
-    else
-      echo "  container : STOPPED"
-    fi
-    local hc=""
-    hc="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${LITELLM_PORT}/health/liveliness" 2>/dev/null || true)"
-    echo "  health    : HTTP ${hc:-none}  (http://127.0.0.1:${LITELLM_PORT})"
-    echo "  dashboard : http://127.0.0.1:${LITELLM_PORT}/ui"
-    echo "  config    : ${LITELLM_CONFIG}"
-    echo "  try       : freeagents restart | freeagents logs | freeagents doctor"
-  else
-    echo "  not installed"
-  fi
-  echo
-  log_info "=== SECONDARY GATEWAY (port 20128) ==="
-  if omni_installed; then
-    local sc=""
-    sc="$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 "http://127.0.0.1:20128/" 2>/dev/null || true)"
-    if [ -n "$sc" ] && [ "$sc" != "000" ]; then
-      echo "  status    : responding (HTTP ${sc})"
-    else
-      echo "  status    : installed, NOT responding (menu item 2 starts it)"
-    fi
-    echo "  dashboard : http://127.0.0.1:20128"
-  else
-    echo "  not installed"
-  fi
-}
-
-eng_remove() {
-  log_info "=== REMOVE (FULL WIPE) ==="
-  full_uninstall
-  if omni_installed; then
-    omni_quiet "Secondary gateway: remove" --uninstall --yes
-  fi
-}
-
-eng_logs() {
+choose_logs() {
   local c=""
-  if omni_installed; then
-    echo -e "   Logs for:  ${C_GREEN}1${C_NC} - Primary gateway   ${C_GREEN}2${C_NC} - Secondary gateway"
+  if litellm_installed && omni_installed; then
+    echo -e "   Logs for:  ${C_GREEN}1${C_NC} - LiteLLM   ${C_GREEN}2${C_NC} - OmniRoute"
     read -r -p "   Choice [1/2]: " c || c="1"
+  elif omni_installed; then
+    c="2"
+  else
+    c="1"
   fi
   case "$c" in
-    2) omni_delegate --logs ;;
-    *)
-      echo "Following the primary gateway logs (Ctrl+C to exit)..."
-      $SUDO docker logs -f --tail 100 "$CONTAINER_NAME"
-      ;;
+    2) cmd_logs omniroute ;;
+    *) cmd_logs litellm ;;
   esac
 }
 
@@ -2459,21 +3120,65 @@ menu_loop() {
     echo
     case "$CHOICE" in
       1) choose_and_install ;;
-      2) eng_start ;;
-      3) eng_stop ;;
+      2) cmd_restart ;;
+      3) cmd_down ;;
       4) cmd_update ;;
-      5) eng_status ;;
-      6) eng_remove ;;
-      7) eng_logs ;;
-      8) config_manager ;;
+      5) cmd_status ;;
+      6) full_uninstall ;;
+      7) choose_logs ;;
+      8) cmd_doctor all ;;
+      9) config_manager ;;
       0|q|Q) log_info "Bye!"; exit 0 ;;
-      *) log_warn "Invalid choice: '${CHOICE}'. Pick 0-8." ;;
+      "") log_warn "Please enter a number between 0 and 9." ;;
+      *) log_warn "Invalid choice: '${CHOICE}'. Pick 0-9." ;;
     esac
   done
 }
 
+#===============================================================================
+# Entry point (also the target of the generated 'freeagents' CLI)
+#===============================================================================
 main() {
-  menu_loop
+  ensure_state_dirs
+  if [ "$#" -eq 0 ]; then
+    menu_loop
+    return 0
+  fi
+  case "$1" in
+    up)          shift; cmd_up "$@" ;;
+    down)        shift; cmd_down "$@" ;;
+    restart)     shift; cmd_restart "$@" ;;
+    status)      shift; cmd_status "$@" ;;
+    logs)        shift; cmd_logs "$@" ;;
+    doctor)      shift; cmd_doctor "${1:-all}" ;;
+    credentials|keys) cmd_credentials ;;
+    update)      shift; cmd_update "$@" ;;
+    uninstall|remove) shift; full_uninstall "${1:-}" ;;
+    install)     shift; full_install "${1:-both}" ;;
+    menu)        menu_loop ;;
+    version|-v|--version) echo "Free AI Agents ${FREE_AGENTS_VERSION}" ;;
+    help|-h|--help)
+      cat <<'USAGE'
+Usage: freeagents [command]
+
+  (no args)            open the interactive manager menu
+  up                   start BOTH gateways (Docker daemon if needed)
+  down                 stop BOTH gateways
+  restart              restart BOTH gateways and wait until healthy
+  status               state, health, ports and files of BOTH gateways
+  doctor [engine]      deep diagnosis (engine: litellm|omniroute, default both)
+  logs [engine]        follow logs (engine: litellm|omniroute, default litellm)
+  credentials          dashboard URLs, logins and Claude tokens
+  update               re-download from the repo + full reinstall (keys kept)
+  uninstall [--yes]    remove everything this installer created
+  install [engine]     install litellm | omniroute | both (non-interactive)
+
+Env knobs: FREEAGENTS_SKIP_WINDOWS=1, FREEAGENTS_KEY_CHECK=0,
+           FREEAGENTS_KEEP_NPM=1, FREEAGENTS_BOOT_MODE=systemd|wslconf|auto
+USAGE
+      ;;
+    *) log_error "Unknown command: '$1'. Try 'freeagents help'."; exit 1 ;;
+  esac
 }
 
 main "$@"

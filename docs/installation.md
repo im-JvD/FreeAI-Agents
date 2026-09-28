@@ -2,6 +2,8 @@
 
 # 📥 راهنمای نصب گام‌به‌گام
 
+نصاب یک اسکریپت واحد است که می‌تواند **LiteLLM**، **OmniRoute** یا **هر دو** را نصب کند؛ کلیدها و پروکسی فقط **یک‌بار** پرسیده می‌شوند و برای هر دو اعمال می‌شوند. هر دو گیت‌وی همان **مدل واحد** `claude-freeagents` را ارائه می‌دهند.
+
 ---
 
 ## ۱. پیش‌نیازها
@@ -10,9 +12,9 @@
 |---|---|
 | ویندوز ۱۰/۱۱ | — |
 | WSL2 با توزیع Ubuntu | `wsl -l -v` در PowerShell → ستون VERSION باید `2` باشد |
-| Claude Code در ویندوز | فقط برای چت لازم است — نصب در PowerShell: `irm https://claude.ai/install.ps1 | iex` (یا `npm install -g @anthropic-ai/claude-code`) — نسخهٔ **v2.1.129+** برای کشف مدل گیت‌وی |
+| Claude Code در ویندوز (اختیاری) | نصب در PowerShell: `irm https://claude.ai/install.ps1 | iex` — نسخهٔ **v2.1.129+** برای کشف مدل گیت‌وی |
 | دسترسی sudo در اوبونتو | اجرای `sudo -v` در ترمینال اوبونتو |
-| اینترنت | برای `apt` (مخازن ایران آزاد است) و `ghcr.io` |
+| اینترنت | برای `apt`، `npm` و `ghcr.io` — Node ≥ ۲۰ در صورت نیاز خودکار نصب می‌شود |
 
 اگر WSL2 ندارید، اول در PowerShell (با دسترسی Administrator) اجرا کنید:
 
@@ -66,42 +68,53 @@ bash setup.sh
 
 ```
 =================================================================
-     Free AI Agents  |  Local AI Gateway Manager
+            Free AI Agents  |  Local AI Gateway Manager
+            Version [ 4.0.0 ]   LiteLLM + OmniRoute
 =================================================================
 
-   Proxy target : ghcr.io/berriai/litellm:main-latest
-   Proxy port   : 4000   (restart policy: unless-stopped)
-   Linux config : /home/<user>/.litellm
-
-   Please choose an option:
-
-     1) Full Install    (Docker + LiteLLM proxy + Claude Code config)
-     2) Full Uninstall  (remove container + all generated configs)
-     q) Quit
-
-   Enter your choice [1/2/q]:
+   1 - Install  ( LiteLLM / OmniRoute / Both )
+   2 - Start / Restart  ( both gateways )
+   3 - Stop             ( both gateways )
+   4 - Update ( re-download from the repo + reinstall, keeps keys )
+   5 - Show Status      ( both gateways )
+   6 - Remove ( full wipe, both gateways )
+   7 - Show Live Logs   ( LiteLLM / OmniRoute )
+   8 - Doctor ( deep diagnosis, both gateways )
+   9 - Config Manager ( proxy - tokens - Claude config - active gateway )
+   0 - Exit ( CTRL + C )
 ```
 
-برای نصب، عدد `1` را وارد کنید.
+> ⚠️ دستورهای قدیمی `litellm up/down` و `omni up/down` وجود ندارند؛ همه‌چیز از همین منو یا دستور واحد `freeagents` انجام می‌شود.
 
 ---
 
-## ۴. مراحل نصب (گزینهٔ 1)
+## ۴. انتخاب گیت‌وی و مراحل نصب
 
-اسکریپت ۹ مرحله را به‌ترتیب انجام می‌دهد:
+با انتخاب گزینهٔ `1` می‌پرسد کدام موتور نصب شود:
+
+```
+   1 - LiteLLM   ( Docker container, port 4000, admin UI )
+   2 - OmniRoute ( official npm package, port 20128, dashboard )
+   3 - Both      ( recommended )
+```
+
+| حالت | چه چیزی نصب می‌شود |
+|---|---|
+| `1` LiteLLM | داکر + کانتینر LiteLLM + پنل UI (پورت 4000) |
+| `2` OmniRoute | Node ≥ ۲۰ + پکیج npm رسمی `omniroute` + داشبورد (پورت 20128) |
+| `3` هر دو | هر دو موتور، با **یک بار** پرسیدن کلیدها؛ گیت‌وی فعال = LiteLLM |
+
+مراحل مشترک (نمونهٔ حالت «هر دو»):
 
 | مرحله | کار |
 |---|---|
-| 1/9 | بررسی محیط WSL2 و موجود بودن `powershell.exe` |
-| 2/9 | نصب داکر از مخازن apt اوبونتو (`docker.io`) — اگر از قبل نباشد |
-| 3/9 | نوشتن میرورهای ایرانی در `/etc/docker/daemon.json` (با بکاپ از فایل قبلی) |
-| — | راه‌اندازی دیمن داکر + فعال‌سازی auto-start در صورت وجود systemd |
-| 4/9 | پروکسی ویندوز (اختیاری) + دریافت ۵ کلید API |
-| 5/9 | ساخت `~/.litellm/config.yaml` و Master Key |
-| 6/9 | دانلود ایمیج آمادهٔ `ghcr.io/berriai/litellm:main-latest` |
-| 7/9 | اجرای کانتینر روی پورت 4000 با `--restart unless-stopped` |
-| 8/9 | پیکربندی اجرای خودکار در بوت WSL + نصب دستورات مدیریت `freeagents` |
-| 9/9 | ساخت `settings.json` کلاد کد + پیکربندی خودکار اپ Claude Desktop (پالیسی رجیستری) |
+| `[1/7]` | بررسی محیط WSL2، وجود `powershell.exe` و ابزارهای لازم |
+| `[2/7]` | نصب داکر از مخازن apt اوبونتو (`docker.io`) — فقط اگر لازم باشد |
+| `[3/7]` | نوشتن میرورهای ایرانی در `/etc/docker/daemon.json` (با بکاپ فایل قبلی) |
+| `[4/7]` | پروکسی ویندوز (اختیاری) + دریافت و تست زندهٔ کلیدهای ۹ ارائه‌دهنده |
+| `[5/7]` | ساخت `~/.litellm/config.yaml` + Master Key + pull ایمیج + اجرای کانتینر |
+| OmniRoute | نصب/بررسی Node، `npm install -g omniroute`، نوشتن `~/.omniroute/.env`، ساخت لانچر و سرویس |
+| پایان | کانفیگ Claude Code/Desktop + اجرای خودکار در بوت + نصب CLI `freeagents` |
 
 ---
 
@@ -113,27 +126,46 @@ bash setup.sh
 Route provider traffic through your Windows proxy? [y/N]:
 ```
 
-اگر روی ویندوز یک برنامهٔ پراکسی دارید (**Clash / v2rayN / Hiddify / Nekoray**)، با `y` همهٔ ترافیک LiteLLM به سمت ارائه‌دهنده‌ها (Groq، Google، Cerebras و…) از همان پراکسی رد می‌شود — یعنی **رفع تحریم بدون VPN سیستم‌عامل**:
+اگر روی ویندوز یک برنامهٔ پراکسی دارید (**Clash / v2rayN / Hiddify / Nekoray**)، با `y` ترافیک **هر دو گیت‌وی** به سمت ارائه‌دهنده‌ها (Groq، Google، Cerebras و…) از همان پراکسی رد می‌شود — یعنی **رفع تحریم بدون VPN سیستم‌عامل**:
 
 - آدرس پیشنهادی خودکار تشخیص داده می‌شود (IP ویندوز از دید WSL + پورت `7890`) — Enter بزنید یا IP:PORT دلخواه بدهید.
 - نصاب یک تست واقعی از داخل همان پراکسی می‌زند و نتیجه را نشان می‌دهد.
-- انتخاب شما در `~/.litellm/windows_proxy.txt` ذخیره می‌شود و نصب دوباره آن را نگه می‌دارد (یا با `n` عوضش کنید).
-- داخل کانتینر به‌صورت `HTTP_PROXY` / `HTTPS_PROXY` تزریق می‌شود (ترافیک لوکال با `NO_PROXY` مستقیم می‌ماند).
-- در `freeagents doctor` هم وضعیتش نمایش داده می‌شود و تست ارائه‌دهنده‌ها از مسیر پراکسی می‌رود.
+- انتخاب شما در `~/.free-ai-agents/windows_proxy.txt` ذخیره می‌شود و نصب دوباره آن را نگه می‌دارد (یا با `n` عوضش کنید).
+- LiteLLM: متغیرهای `HTTP_PROXY`/`HTTPS_PROXY` روی کانتینر — OmniRoute: همان متغیرها در `~/.omniroute/.env`.
+- در `freeagents doctor` وضعیتش نمایش داده می‌شود و تست ارائه‌دهنده‌ها از مسیر پراکسی می‌رود.
 
 نکته: در برنامهٔ پراکسی گزینهٔ **Allow LAN** را روشن کنید تا اتصال از WSL پذیرفته شود.
 
+---
+
 ## ۵. دریافت و وارد کردن کلیدهای API
 
-اسکریپت ۵ کلید می‌پرسد. **کلیدی ندارید؟ فقط Enter بزنید** تا رد شود — اما **حداقل یک کلید الزامی است** (اگر هیچ کلیدی ندهید، دوباره سؤال می‌شود؛ حداکثر ۳ بار).
+نصاب اول **۵ ارائه‌دهندهٔ اصلی** را می‌پرسد و بعد می‌پرسد آیا ۴ ارائه‌دهندهٔ اضافه را هم می‌خواهید:
+
+```
+Add more free providers (GitHub Models, SambaNova, NVIDIA NIM, Together AI)? [y/N]:
+```
+
+**کلیدی ندارید؟ فقط Enter بزنید** تا رد شود — اما **حداقل یک کلید الزامی است** (اگر هیچ کلیدی ندهید، دوباره سؤال می‌شود؛ حداکثر ۳ بار).
+
+### ارائه‌دهنده‌های اصلی
 
 | ترتیب | سرویس | لینک دریافت کلید رایگان | پیشوند نمونه |
 |---|---|---|---|
 | 1 | Groq | [console.groq.com/keys](https://console.groq.com/keys) | `gsk_...` |
 | 2 | OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys) | `sk-or-...` |
-| 3 | Google AI | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | `AIza...` |
+| 3 | Google AI Studio | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | `AIza...` |
 | 4 | Cerebras | [cloud.cerebras.ai](https://cloud.cerebras.ai) | `csk-...` |
 | 5 | Mistral | [console.mistral.ai/api-keys](https://console.mistral.ai/api-keys) | `...` |
+
+### ارائه‌دهنده‌های اضافه (اختیاری)
+
+| ترتیب | سرویس | لینک دریافت کلید | نکته |
+|---|---|---|---|
+| 1 | GitHub Models | [github.com/settings/tokens](https://github.com/settings/tokens) | فقط برای LiteLLM؛ OmniRoute در حالت API-key پشتیبانی نمی‌کند و در نصب رد می‌شود (در داشبورد قابل افزودن است) |
+| 2 | SambaNova | [cloud.sambanova.ai/apis](https://cloud.sambanova.ai/apis) | — |
+| 3 | NVIDIA NIM | [build.nvidia.com](https://build.nvidia.com) | پیشوند `nvapi-` |
+| 4 | Together AI | [api.together.ai/settings/api-keys](https://api.together.ai/settings/api-keys) | — |
 
 نکته‌ها:
 
@@ -144,83 +176,84 @@ Route provider traffic through your Windows proxy? [y/N]:
   - `could not verify` → شبکه به آن سرویس نمی‌رسد (مثلاً Google بدون VPN) — عبوری است و مانع نصب نمی‌شود
   - 💡 اگر پروکسی ویندوز را فعال کرده باشید، تست کلیدها هم از مسیر پراکسی می‌رود و Google/Cerebras هم تأیید می‌شوند
 - فاصله‌های اضافی ابتدا و انتهای کلید به‌صورت خودکار حذف می‌شوند.
-- فقط مدل‌های ارائه‌دهنده‌هایی که کلید داده‌اید ساخته می‌شوند.
+- فقط ارائه‌دهنده‌هایی که کلید داده‌اید در مدل واحد حاضر می‌شوند.
 
 ---
 
 ## ۶. خروجی موفق نصب
 
-در پایان باید این پیام را ببینید:
+در پایان باید چیزی شبیه این ببینید:
 
 ```
 =================================================================
   INSTALLATION COMPLETED SUCCESSFULLY!
 =================================================================
 
-  LiteLLM endpoint (from Windows) : http://127.0.0.1:4000/v1
+  Engines installed : both
+  Active gateway    : litellm  (FreeAgents/LiteLLM)
+  Model for Claude  : claude-freeagents
 
-  ADMIN PANEL (UI) - open in the WINDOWS browser:
-    URL       : http://127.0.0.1:4000/ui
-    Username  : admin
-    Password  : (the Master key below)
+  LiteLLM
+    Endpoint    : http://127.0.0.1:4000/v1
+    Admin panel : http://127.0.0.1:4000/ui  (user: admin)
+    Master key  : /home/<user>/.litellm/master_key.txt   (also the dashboard password)
+    Config      : /home/<user>/.litellm/config.yaml
 
-  Master key (also saved to)      : /home/<user>/.litellm/master_key.txt
-  Master key                      : sk-...
-  LiteLLM config file             : /home/<user>/.litellm/config.yaml
-  Claude Code settings (Windows)  : /mnt/c/Users/<Name>/.claude/settings.json
-  Windows proxy routing           : http://172.30.208.1:10808   (یا disabled)
-  Container name                  : litellm
-  Auto-start on WSL boot          : systemd service / wsl.conf boot command
-  ...
+  OmniRoute
+    Endpoint    : http://127.0.0.1:20128/v1
+    Dashboard   : http://127.0.0.1:20128
+    Dashboard   : password stored in /home/<user>/.omniroute/.env (INITIAL_PASSWORD)
+    Claude key  : /home/<user>/.free-ai-agents/omniroute_claude.key
+
+  Claude Code settings : %USERPROFILE%\.claude\settings.json
+  Auto-start on boot   : systemd units (freeagents boot helper / omniroute.service)
+  Windows proxy        : disabled
+
+  MANAGEMENT
+    freeagents                 open this menu
+    freeagents status          both gateways
+    freeagents doctor          deep diagnosis (both)
+    freeagents logs omniroute  live logs of the second engine
+
+  NEXT STEPS (on WINDOWS)
+    1. Install Claude Code (once):  irm https://claude.ai/install.ps1 | iex
+    2. Open a NEW terminal and run: claude
+    3. Pick the model with /model - it is listed as 'claude-freeagents'
+       (Claude Desktop shows it as 'FreeAgents/LiteLLM').
 ```
 
 ---
 
-## ۷. پنل مدیریت (UI)، اجرای خودکار و دستورات مدیریت
+## ۷. پنل‌های مدیریت، اجرای خودکار و دستورات
 
-### پنل مدیریت LiteLLM
+### پنل‌ها
 
-در مرورگر **ویندوز** باز کنید: `http://127.0.0.1:4000/ui`
-
-| فیلد | مقدار |
-|---|---|
-| Username | `admin` |
-| Password | همان **Master Key** — پسورد جداگانه‌ای وجود ندارد! |
-
-🔑 **پسورد پنل دقیقاً همان Master Key است.** برای دیدن آن یکی از این راه‌ها:
+| پنل | آدرس | ورود |
+|---|---|---|
+| LiteLLM UI | `http://127.0.0.1:4000/ui` | `admin` / همان Master Key |
+| OmniRoute Dashboard | `http://127.0.0.1:20128` | رمز ذخیره‌شده در `~/.omniroute/.env` (`INITIAL_PASSWORD`) |
 
 ```bash
-freeagents credentials                          # URL + username + password همه با هم
-cat ~/.litellm/master_key.txt                # فقط کلید
-cat ~/.litellm/dashboard_credentials.txt     # فایل مخصوص اطلاعات ورود داشبورد
+freeagents credentials     # URL/نام‌کاربری/رمز هر دو پنل + توکن‌های Claude
 ```
-
-رشته‌ای که با `sk-` شروع می‌شود را کپی کنید و در فرم لاگین پنل بچسبانید.
-
-> ℹ️ ورود به پنل به یک دیتابیس نیاز دارد؛ نصاب خودش کانتینر `litellm-db` (Postgres) را می‌سازد و به پروکسی وصل می‌کند. اگر قبلاً با نسخه‌های اولیه نصب کرده‌اید و خطای «Not connected to DB!» می‌بینید، یک بار گزینهٔ `1` را دوباره اجرا کنید.
 
 ### اجرای خودکار در بوت WSL
 
-اسکریپت بسته به وضعیت سیستم شما یکی از دو مکانیزم را نصب می‌کند:
-
-- اگر **systemd** فعال باشد (`[boot] systemd=true` در `/etc/wsl.conf`): سرویس `litellm.service` ساخته و enable می‌شود که در بوت، داکر و سپس کانتینر را بالا می‌آورد.
-- در غیر این صورت: یک **boot command** در `/etc/wsl.conf` اضافه می‌شود (`command = /usr/local/bin/litellm-boot.sh`) که موقع باز شدن WSL اجرا شده و داکر + کانتینر را start می‌کند.
-
-در هر دو حالت، خود کانتینر هم `--restart unless-stopped` است؛ یعنی تا وقتی خودتان `litellm down` نزده باشید، همیشه بالا می‌ماند.
+- اگر **systemd** فعال باشد: سرویس‌های `litellm.service` و `omniroute.service` نصب و enable می‌شوند.
+- در غیر این صورت: یک **boot command** در `/etc/wsl.conf` اضافه می‌شود (`command = /usr/local/bin/freeagents-boot.sh`).
+- خود کانتینر LiteLLM هم `--restart unless-stopped` است.
 
 ### دستورات مدیریت سریع
 
-بعد از نصب، این دستورات در ترمینال WSL در دسترس‌اند:
-
 ```bash
-freeagents status     # وضعیت کانتینر، سلامت و مسیر فایل‌ها
-freeagents credentials # نمایش URL، نام کاربری و پسورد پنل مدیریت
-freeagents doctor      # تشخیص عمیق + تست چت واقعی برای تک‌تک مدل‌ها
-freeagents up         # روشن کردن (داکر و کانتینر)
-freeagents down       # خاموش کردن
-freeagents restart    # ری‌استارت + انتظار برای سلامت
-freeagents logs       # مشاهدهٔ زندهٔ لاگ‌ها (Ctrl+C برای خروج)
-freeagents uninstall  # حذف کامل (کانتینر، کانفیگ‌ها و خود CLI)
+freeagents              # باز کردن منو
+freeagents status       # وضعیت هر دو گیت‌وی (health، پورت، فایل‌ها)
+freeagents up|down|restart
+freeagents logs [litellm|omniroute]
+freeagents doctor [litellm|omniroute]
+freeagents credentials
+freeagents update       # دانلود مجدد از ریپو + نصب مجدد (کلیدها حفظ می‌شوند)
+freeagents uninstall    # حذف کامل
 ```
 
 ### اجرای دوبارهٔ نصاب: کلیدها دوباره پرسیده می‌شوند؟
@@ -228,7 +261,7 @@ freeagents uninstall  # حذف کامل (کانتینر، کانفیگ‌ها و
 نه! اگر نصب قبلی موجود باشد، نصاب کلیدهای فعلی را (ماسک‌شده) نشان می‌دهد و می‌پرسد:
 
 ```
-Existing API keys found (from the previous install):
+Existing provider keys found (from the previous install):
   Groq       : gsk_****abcd
   ...
 Keep these keys? [Y/n]:
@@ -237,24 +270,24 @@ Keep these keys? [Y/n]:
 - **Enter یا y** → همان کلیدهای قبلی حفظ می‌شوند (بدون هیچ سؤال اضافه)
 - **n** → کلیدهای جدید از شما پرسیده می‌شود و جایگزین می‌شوند
 
-Master Key هم **تغییر نمی‌کند** (پسورد داشبورد و کانفیگ Claude Code تان ثابت می‌ماند).
+Master Key و secretهای OmniRoute هم **تغییر نمی‌کنند** (پسورد داشبوردها و کانفیگ Claude Code ثابت می‌ماند).
 
 ---
 
-## ۸. راه‌اندازی Claude Code در ویندوز
+## ۸. راه‌اندازی Claude Code و Claude Desktop
 
-1. اگر هنوز نصب نیست، در PowerShell نصبش کنید (فقط یک بار):
+1. اگر Claude Code نصب نیست، در PowerShell نصبش کنید (فقط یک بار):
    ```powershell
    irm https://claude.ai/install.ps1 | iex
    ```
    یا با npm: `npm install -g @anthropic-ai/claude-code`
 2. یک **ترمینال جدید** ویندوز باز کنید و وارد پوشهٔ پروژهٔ خود شوید: `cd C:\projects\my-app`
 3. اجرا کنید: `claude`
-4. همه‌چیز از قبل پیکربندی شده — مدل پیش‌فرض در `settings.json` ثبت شده و پیکر `/model` هم فهرست کامل مدل‌های پروکسی را با برچسب «From gateway» نشان می‌دهد (نیاز به **v2.1.129+**).
+4. همه‌چیز از قبل پیکربندی شده — مدل پیش‌فرض `claude-freeagents` در `settings.json` ثبت شده و پیکر `/model` هم فهرست مدل‌ها را با برچسب «From gateway» نشان می‌دهد (نیاز به **v2.1.129+**).
 
-> 🖥️ اپ **Claude Desktop** هم خودکار پیکربندی می‌شود (پالیسی `HKCU\SOFTWARE\Policies\Claude`) — اپ را ری‌استارت کنید؛ مدل‌های `claude-*` در Cowork آماده‌اند.
+> 🖥️ اپ **Claude Desktop** هم خودکار پیکربندی می‌شود: نصاب پروفایل گیت‌وی را در `%LOCALAPPDATA%\Claude-3p\configLibrary` می‌نویسد و گیت‌وی فعال را در `_meta.json` علامت می‌زند. اپ را کامل ببندید و باز کنید؛ مدل با برچسب `FreeAgents/LiteLLM` یا `FreeAgents/Omni` ظاهر می‌شود.
 
-> 📖 ادامهٔ ماجرا (انتخاب مدل، استفادهٔ روزمره، رفع اشکال سریع): **[usage.md](usage.md)**
+> 📖 ادامهٔ ماجرا (انتخاب مدل، تعویض گیت‌وی، استفادهٔ روزمره، رفع اشکال سریع): **[usage.md](usage.md)**
 
 ---
 
@@ -263,14 +296,19 @@ Master Key هم **تغییر نمی‌کند** (پسورد داشبورد و ک�
 داخل WSL:
 
 ```bash
-sudo docker ps                       # کانتینر litellm باید Up باشد
-curl -s http://127.0.0.1:4000/health/liveliness   # خروجی: I'm alive!
+freeagents status                    # وضعیت و health هر دو گیت‌وی
+freeagents doctor                    # تشخیص عمیق + تست زندهٔ ارائه‌دهنده‌ها
 ```
 
-با احراز هویت و دیدن لیست مدل‌ها:
+بررسی دستی:
 
 ```bash
+# LiteLLM
+curl -s http://127.0.0.1:4000/health/liveliness          # خروجی: I'm alive!
 curl -s http://127.0.0.1:4000/v1/models -H "Authorization: Bearer $(cat ~/.litellm/master_key.txt)"
+
+# OmniRoute
+curl -s http://127.0.0.1:20128/healthz                   # خروجی: ok
 ```
 
 با مشکل مواجه شدید؟ → [troubleshooting.md](troubleshooting.md)

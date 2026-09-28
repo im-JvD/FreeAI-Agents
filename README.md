@@ -4,7 +4,7 @@
 
 > **setup.sh** — یک اسکریپت، دو موتور: **LiteLLM** و **OmniRoute** را داخل WSL2 نصب، کانفیگ و مدیریت می‌کند و Claude Code و اپ Claude Desktop را به‌طور خودکار به آن‌ها وصل می‌کند.
 
-نصب‌کننده و پیکربندی‌کنندهٔ یک‌مرحله‌ای **پروکسی LiteLLM** (و مدیریت **OmniRoute**) داخل **WSL2 Ubuntu** و اتصال آن به ابزار کدنویسی هوش مصنوعی **Claude Code** در ویندوز — بدون نیاز به build، با ایمیج آماده و میرورهای ایرانی برای دور زدن تحریم‌ها.
+نصب‌کننده و پیکربندی‌کنندهٔ یک‌مرحله‌ای **دو گیت‌وی رایگان** داخل **WSL2 Ubuntu** و اتصال آن‌ها به ابزار کدنویسی **Claude Code** و اپ **Claude Desktop** در ویندوز. هر دو گیت‌وی با **یک کلید مدل مشترک** (`claude-freeagents`) در دسترس‌اند؛ کاربر فقط یک‌بار کلیدهای ارائه‌دهنده‌ها را وارد می‌کند و می‌تواند هر کدام از دو موتور (یا هر دو) را نصب کند.
 
 ---
 
@@ -37,62 +37,72 @@ bash <(wget -qO- https://raw.githubusercontent.com/im-JvD/FreeAI-Agents/main/set
 
 | ویژگی | توضیح |
 |---|---|
-| 🖥️ منوی تعاملی | گزینهٔ `1` نصب کامل، گزینهٔ `2` حذف کامل |
+| 🖥️ منوی تعاملی ۰–۹ | نصب (LiteLLM / OmniRoute / هر دو)، شروع/توقف، وضعیت، لاگ، Doctor، Config Manager، آپدیت و حذف کامل |
+| 🧠 یک مدل، هر دو گیت‌وی | مدل واحد `claude-freeagents` (با برچسب `FreeAgents/LiteLLM` و `FreeAgents/Omni`) — دو گیت‌وی، یک نام مدل |
 | 🐳 نصب داکر بدون تحریم | از مخازن `apt` اوبونتو (`docker.io`) — بدون `get.docker.com` |
 | 🇮🇷 میرورهای ایرانی | ArvanCloud، Liara و IranServer در `/etc/docker/daemon.json` برای رفع خطای 403 |
-| 📦 بدون build | فقط ایمیج آمادهٔ `ghcr.io/berriai/litellm:main-latest` (با retry خودکار، fallback به ایمیج لوکال و میرور اختیاری ghcr) |
-| 🔑 ۵ کلید API + تست زنده | Groq، OpenRouter، Google AI، Cerebras، Mistral — هر کلید قبل از نصب واقعاً تست می‌شود (کشف کلیدهای جابجا) |
-| 🧠 ۷ مدل کدنویسی | ساخت خودکار `config.yaml` فقط بر اساس کلیدهایی که داده‌اید |
-| 🔁 اجرای پایدار | کانتینر با `--restart unless-stopped` روی پورت 4000 |
-| 🖥️ پنل مدیریت | رابط وب LiteLLM روی `http://127.0.0.1:4000/ui` با دیتابیس اختصاصی (رفع کامل خطای «Not connected to DB») |
-| ⚙️ استارت خودکار در بوت WSL | سرویس systemd یا boot command در `/etc/wsl.conf` |
-| ⌨️ CLI مدیریت | `freeagents up / down / restart / status / credentials / doctor / logs / uninstall` |
+| 📦 بدون build | ایمیج آمادهٔ `ghcr.io/berriai/litellm:main-latest` (با retry خودکار، fallback به ایمیج لوکال و میرور اختیاری ghcr) |
+| 🟢 OmniRoute از npm رسمی | `npm install -g omniroute` (+ Node ≥ 20 از NodeSource و fallback به `registry.npmmirror.com`) — بدون داکر، بدون ریپوی واسط |
+| 🔑 ۹ کلید API + تست زنده | Groq، OpenRouter، Google AI Studio، Cerebras، Mistral + GitHub Models، SambaNova، NVIDIA NIM، Together AI — هر کلید قبل از نصب واقعاً تست می‌شود (کشف کلیدهای جابجا) |
+| 🔁 روتینگ هوشمند LiteLLM | یک model group روی همهٔ کلیدها با retry/cooldown؛ اگر یک ارائه‌دهنده خطا بدهد، بعدی خودکار امتحان می‌شود |
+| 🎯 Combo خودکار OmniRoute | یک combo با استراتژی `auto` که همان ارائه‌دهنده‌ها را پشت مدل واحد جمع می‌کند |
+| 🖥️ پنل‌های مدیریت | LiteLLM UI روی `http://127.0.0.1:4000/ui` و داشبورد OmniRoute روی `http://127.0.0.1:20128` |
+| ⚙️ استارت خودکار در بوت WSL | سرویس systemd (یا boot command در `/etc/wsl.conf`) برای هر دو گیت‌وی |
+| ⌨️ CLI مدیریت | یک دستور برای همه‌چیز: `freeagents up / down / restart / status / logs / doctor / credentials / update / uninstall` |
 | 🪟 تشخیص هوشمند ویندوز | پیدا کردن مسیر پروفایل با PowerShell (حتی با فاصله در نام کاربری) |
-| 🖥️ اپ Claude Desktop خودکار | اتصال Cowork به پروکسی بدون Developer Mode — با پالیسی رجیستری `HKCU\SOFTWARE\Policies\Claude` (با `LITELLM_DESKTOP_CONFIG=0` قابل خاموش‌کردن) |
-| 🔒 کلید امن | ساخت خودکار Master Key و ذخیرهٔ امن آن |
-| 🧪 تست‌شده | ۳۴ سناریوی شبیه‌سازی‌شده + تست واقعی E2E با خودِ LiteLLM |
-| 🎛️ Config Manager | خاموش/روشن‌کردن پروکسی ویندوز، ویرایش توکن‌ها، اعمال دوبارهٔ کانفیگ Claude، تغییر پروفایل فعال دسکتاپ |
-| 🔄 Update | دانلود خودکار آخرین نسخهٔ اسکریپت از ریپو + نصب مجدد کامل (کلیدها و پروکسی حفظ می‌شوند) |
+| 🖥️ اپ Claude Desktop خودکار | ساخت پروفایل گیت‌وی در `%LOCALAPPDATA%\Claude-3p\configLibrary` + به‌روزرسانی `_meta.json` |
+| 🔒 کلید امن | Master Key و secretهای OmniRoute خودکار ساخته و با دسترسی `600` ذخیره می‌شوند |
+| 🧪 تست‌شده | ۲۳ سناریوی آفلاین (با mock کامل OmniRoute) + تست واقعی E2E با خودِ LiteLLM |
+| 🎛️ Config Manager | خاموش/روشن‌کردن پروکسی ویندوز، ورود دوبارهٔ توکن‌ها، اعمال دوبارهٔ کانفیگ Claude، تغییر گیت‌وی فعال دسکتاپ |
+| 🔄 Update | دانلود خودکار آخرین نسخهٔ اسکریپت از همین ریپو + نصب مجدد کامل (کلیدها و پروکسی حفظ می‌شوند) |
+| 🧹 Uninstall تمیز | حذف کانتینر، سرویس‌ها، پکیج npm، پروفایل‌های Claude و همهٔ فایل‌های ساخته‌شده — با یک تأیید |
 
 ---
 
 ## 🎛️ منوی اسکریپت
 
 ```
- 1 - Install  ( LiteLLM / OmniRoute / Both )      5 - Show Status
- 2 - Start / Restart                              6 - Remove ( Full wipe )
- 3 - Stop                                         7 - Show Live Logs
- 4 - Update (re-download + reinstall, keeps keys) 8 - Config Manager
- 0 - Exit
+ 1 - Install  ( LiteLLM / OmniRoute / Both )
+ 2 - Start / Restart  ( both gateways )
+ 3 - Stop             ( both gateways )
+ 4 - Update ( re-download from the repo + reinstall, keeps keys )
+ 5 - Show Status      ( both gateways )
+ 6 - Remove ( full wipe, both gateways )
+ 7 - Show Live Logs   ( LiteLLM / OmniRoute )
+ 8 - Doctor ( deep diagnosis, both gateways )
+ 9 - Config Manager ( proxy - tokens - Claude config - active gateway )
+ 0 - Exit ( CTRL + C )
 ```
 
 توکن‌ها و پروکسی فقط **یک‌بار** پرسیده می‌شوند و برای هر دو موتور اعمال می‌شوند. پس از نصب، دستور `freeagents` در دسترس است:
 
 ```
-freeagents up | down | restart | status | logs | doctor | uninstall
+freeagents up | down | restart | status | logs | doctor | credentials | update | uninstall
 freeagents            (بازکردن دوبارهٔ همین منو)
+freeagents status     (وضعیت هر دو گیت‌وی: health، پورت و فایل‌ها)
 ```
 
-## 🧠 مدل‌های پشتیبانی‌شده
+---
 
-| مدل | ارائه‌دهنده | کاربرد |
+## 🧠 مدل واحد
+
+| کلید مدل | نمایش در کلاد | توضیح |
 |---|---|---|
-| `claude-gpt-oss-120b` | Groq | کدنویسی و مدل پیش‌فرض (رایگان) |
-| `claude-gpt-oss-20b` | Groq | فوق‌سریع — مدل پس‌زمینه کلاد کد (رایگان) |
-| `claude-deepseek-v3.1` | OpenRouter | چت و کدنویسی (رایگان) |
-| `claude-deepseek-v3-0324` | OpenRouter | کدنویسی رایگان جایگزین (رایگان) |
-| `gemini-2.0-flash` | Google AI | سرعت بالا + کانتکست بزرگ (رایگان) |
-| `claude-llama3.1-70b` | Cerebras | استنتاج فوق‌سریع (رایگان) |
-| `claude-codestral` | Mistral | تخصصی کدنویسی |
+| `claude-freeagents` | `FreeAgents/LiteLLM` | یک model group روی ۹ ارائه‌دهنده با retry/cooldown (LiteLLM) |
+| `claude-freeagents` | `FreeAgents/Omni` | یک combo با استراتژی `auto` روی همان ارائه‌دهنده‌ها (OmniRoute) |
+
+- هر دو گیت‌وی **همان یک نام مدل** را ارائه می‌دهند: `claude-freeagents` — کافی است همین را در Claude Code (`/model`) یا پروفایل Claude Desktop انتخاب کنید.
+- برای سازگاری با کاتالوگ مدل اپ دسکتاپ، یک **alias مخفی** (`claude-sonnet-4-5`) هم تعریف می‌شود که به همان مدل واحد می‌رسد و در `/v1/models` نمایش داده نمی‌شود.
+- فقط ارائه‌دهنده‌هایی که کلیدشان را وارد کرده‌اید در مدل نهایی حاضرند.
 
 ---
 
 ## 📋 پیش‌نیازها
 
 - ویندوز ۱۰/۱۱ با **WSL2** و توزیع **Ubuntu** (تست‌شده روی Ubuntu 22.04+)
-- **Claude Code** در سمت ویندوز (فقط برای چت): نصب با `irm https://claude.ai/install.ps1 | iex`
+- **Claude Code** در سمت ویندوز (اختیاری، برای چت): نصب با `irm https://claude.ai/install.ps1 | iex`
 - دسترسی `sudo` در اوبونتو
-- اتصال اینترنت (برای `apt` و `ghcr.io` — داکرهاب تحریم است ولی ghcr معمولاً باز است)
+- اتصال اینترنت (برای `apt`، `npm` و `ghcr.io` — داکرهاب تحریم است ولی ghcr معمولاً باز است)
 
 ---
 
@@ -101,19 +111,21 @@ freeagents            (بازکردن دوبارهٔ همین منو)
 ```
 FreeAI-Agents/
 ├── setup.sh             ← اسکریپت اصلی (قابل اجرای مستقیم از GitHub)
+├── .gitignore               ← لاگ‌های تست و بدل‌های تولیدشده نادیده گرفته می‌شوند
 ├── docs/                    ← مستندات کامل فارسی
 │   ├── README.md            ← فهرست مستندات
 │   ├── installation.md      ← راهنمای گام‌به‌گام نصب
 │   ├── configuration.md     ← شرح کامل فایل‌های پیکربندی
+│   ├── usage.md             ← استفاده در Claude Code و Claude Desktop
 │   ├── uninstall.md         ← راهنمای حذف کامل
 │   └── troubleshooting.md   ← عیب‌یابی خطاهای رایج
 └── tests/                   ← تست‌های خودکار + نتایج اجرا
     ├── README.md            ← مستندات تست‌ها
-    ├── run_all_tests.sh     ← سوئیت ۱۷ سناریویی آفلاین
-    ├── e2e_litellm_real.sh  ← تست واقعی E2E با LiteLLM
-    ├── e2e_real_docker.sh   ← تست واقعی E2E با Docker (روی WSL2)
-    ├── helpers/stubbin/     ← بدل‌های ایزوله برای تست
-    └── results/             ← نتایج ثبت‌شدهٔ اجراها
+    ├── run_all_tests.sh     ← سوئیت ۲۳ سناریویی آفلاین (بدون شبکه)
+    ├── e2e_litellm_real.sh  ← تست واقعی E2E با خودِ LiteLLM (PyPI/venv)
+    ├── e2e_real_docker.sh   ← تست واقعی E2E با Docker (روی WSL2 واقعی)
+    ├── helpers/             ← mock سرور OmniRoute + بدل‌های ایزوله (stubbin)
+    └── results/             ← فقط summary.txt ثبت می‌شود (لاگ‌ها ignore هستند)
 ```
 
 ---
@@ -131,6 +143,16 @@ FreeAI-Agents/
 
 ## 🔒 نکتهٔ امنیتی
 
-کلیدهای API شما فقط به‌صورت متغیر محیطی به کانتینر LiteLLM تزریق می‌شوند و داخل `config.yaml` نوشته **نمی‌شوند**. Master Key هم در `~/.litellm/master_key.txt` با دسترسی `600` ذخیره می‌شود. هرگز این فایل‌ها را در مخازن عمومی قرار ندهید.
+کلیدهای API شما به‌صورت متغیر محیطی به LiteLLM تزریق می‌شوند و داخل `config.yaml` نوشته **نمی‌شوند**. مسیر فایل‌های حساس:
+
+| فایل | مسیر | دسترسی |
+|---|---|---|
+| Master Key لایت‌ال‌ال‌ام | `~/.litellm/master_key.txt` | `600` |
+| ورودهای داشبورد LiteLLM | `~/.litellm/dashboard_credentials.txt` | `600` |
+| secretهای OmniRoute (JWT/API-KEY/رمز اولیه) | `~/.omniroute/.env` | `600` |
+| کلیدهای ارائه‌دهنده (برای نصب‌های بعدی) | `~/.free-ai-agents/provider_keys.env` | `600` |
+| پروکسی اختیاری ویندوز | `~/.free-ai-agents/windows_proxy.txt` | `600` |
+
+هرگز این فایل‌ها را در مخازن عمومی قرار ندهید.
 
 </div>

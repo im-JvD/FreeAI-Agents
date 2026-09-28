@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#-------------------------------------------------------------------------------
+# Test stub: node
+#
+# Reports a Node.js version that satisfies the OmniRoute requirement (>= 20)
+# so ensure_node_runtime takes the "already new enough" branch.
+#-------------------------------------------------------------------------------
+[ -n "${T_WORKSTATE:-}" ] && printf 'node %s\n' "$*" >> "${T_WORKSTATE}/node-calls.log"
+case "${1:-}" in
+  -v|--version) echo "v${FAKE_NODE_VERSION:-22.14.0}" ;;
+  *) exit 0 ;;
+esac
+exit 0

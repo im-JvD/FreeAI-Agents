@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#-------------------------------------------------------------------------------
+# Test stub: omniroute (official CLI emulator - installed by the npm stub)
+#
+#   * `serve` really starts a server: the stub execs the offline mock of the
+#     OmniRoute REST API (tests/helpers/mock_omniroute.py) with the port, the
+#     management password and the request log taken from the generated .env /
+#     test environment. That makes the installer's launcher, PID handling and
+#     health-wait code paths fully real.
+#   * every invocation is recorded in $T_WORKSTATE/omniroute-calls.log
+#
+# Test env:
+#   MOCK_REJECT_LOGIN - pass --reject-login to the mock (login always 401)
+#-------------------------------------------------------------------------------
+[ -n "${T_WORKSTATE:-}" ] && printf 'omniroute %s\n' "$*" >> "${T_WORKSTATE}/omniroute-calls.log"
+
+case "${1:-}" in
+  serve)
+    mock="${STUBBIN:-$(cd "$(dirname "$0")" && pwd)}/../mock_omniroute.py"
+    mock="$(cd "$(dirname "$mock")" && pwd)/$(basename "$mock")"
+    args=(--port "${PORT:-20128}")
+    [ -n "${T_WORKSTATE:-}" ] && args+=(--log "${T_WORKSTATE}/mock-requests.log")
+    [ -n "${OMNI_ENV_FILE:-}" ] && args+=(--env-file "$OMNI_ENV_FILE")
+    [ -n "${MOCK_REJECT_LOGIN:-}" ] && args+=(--reject-login)
+    exec python3 "$mock" "${args[@]}"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
